@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from io import BytesIO, StringIO
+from io import BytesIO
 import json
 import re
 import unicodedata
 
+from lxml import html as lxml_html
 import pandas as pd
 
 from app.drive_client import SourceKind
@@ -50,17 +51,17 @@ FIELD_SPECS: dict[SourceKind, tuple[FieldSpec, ...]] = {
         FieldSpec("electronic_publication_code", ("電子出版コード", "電子書籍コード"), True, 1),
         FieldSpec("author_identifier_id", ("著者識別ID", "著者ID"), True, 2),
         FieldSpec("title", ("書名", "商品名", "タイトル"), True, 3),
-        FieldSpec("planning_editor", ("企画編集者", "編集担当"), False, 4),
+        FieldSpec("planning_editor", ("企画編集者", "編集担当", "企画編集"), False, 4),
         FieldSpec("author_category", ("著者区分", "著者種別"), True, 6),
         FieldSpec("payee_code", ("支払先コード", "支払先CD"), False, 7),
         FieldSpec("author_name", ("著者名", "権利者名"), True, 8),
-        FieldSpec("payee_name", ("支払先名",), False, 8),
-        FieldSpec("initial_royalty_rate", ("初回印税率", "印税率"), False, 13),
-        FieldSpec("revised_royalty_rate", ("改定印税率",), False, 14),
-        FieldSpec("revised_rate_sales_quantity", ("改定部数", "改定販売数"), False, 15),
-        FieldSpec("revised_rate_sales_amount", ("改定金額", "改定売上額"), False, 16),
-        FieldSpec("payment_hold_limit_amount", ("支払保留限度額", "支払保留額"), False, 17),
-        FieldSpec("withholding_tax_type", ("源泉税区分", "税区分"), False, 18),
+        FieldSpec("payee_name", ("支払先名",), False, 10),
+        FieldSpec("initial_royalty_rate", ("初回印税率", "初期印税率", "印税率"), False, 13),
+        FieldSpec("revised_royalty_rate", ("改定印税率", "変更後の印税率"), False, 14),
+        FieldSpec("revised_rate_sales_quantity", ("改定部数", "改定販売数", "印税率変更 売上数"), False, 15),
+        FieldSpec("revised_rate_sales_amount", ("改定金額", "改定売上額", "印税率変更 売上額"), False, 16),
+        FieldSpec("payment_hold_limit_amount", ("支払保留限度額", "支払保留額", "支払留保上限額"), False, 17),
+        FieldSpec("withholding_tax_type", ("源泉税区分", "税区分", "源泉徴収種別"), False, 18),
     ),
     SourceKind.EP_STATEMENT_DETAIL: (
         FieldSpec("accounting_month", ("計上年月", "売上年月"), True),
@@ -124,8 +125,20 @@ class WorkbookParser:
             return self._parse_html(payload)
 
     def _parse_html(self, payload: bytes) -> list[tuple[str, pd.DataFrame]]:
-        tables = pd.read_html(StringIO(_decode_html(payload)), header=None)
-        return [(f"html_table_{i + 1}", table.astype(str)) for i, table in enumerate(tables)]
+        document = lxml_html.fromstring(_decode_html(payload))
+        tables: list[tuple[str, pd.DataFrame]] = []
+        for table_index, table in enumerate(document.xpath("//table"), start=1):
+            rows: list[list[str]] = []
+            for tr in table.xpath(".//tr"):
+                cells = [_clean("".join(cell.itertext())) for cell in tr.xpath("./th|./td")]
+                if cells:
+                    rows.append(cells)
+            if not rows:
+                continue
+            width = max(len(row) for row in rows)
+            normalized_rows = [row + [""] * (width - len(row)) for row in rows]
+            tables.append((f"html_table_{table_index}", pd.DataFrame(normalized_rows, dtype=str)))
+        return tables
 
     def _build(self, source_kind: SourceKind, sheet_name: str, dataframe: pd.DataFrame) -> ParsedSheet:
         normalized = dataframe.where(pd.notna(dataframe), "").map(_clean)
