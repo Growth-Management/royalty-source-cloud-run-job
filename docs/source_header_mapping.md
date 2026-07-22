@@ -1,8 +1,9 @@
 # Source Header Mapping
 
-実 Drive フォルダ `1w0dUHIsBxlp1BHy0VQuxg0DyBEQqbnJX` の加工前ファイル確認結果です。
+実 Drive フォルダ `1_ekKWjs9xfCZe5LNwCpJNQ5TItUKgbtY` の加工前ファイル確認結果です。
+加工後参考 Drive フォルダは `14lzje9nw2uOLeNEmvuFDu-hnNE7kP34T` です。
 
-確認日: 2026-07-21
+確認日: 2026-07-22
 
 ## 対象ファイル
 
