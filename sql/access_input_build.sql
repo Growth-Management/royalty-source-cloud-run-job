@@ -116,23 +116,57 @@ WITH author_lookup AS (
     PARTITION BY CONCAT('01-', TRIM(col_001))
     ORDER BY loaded_at DESC, row_number
   ) = 1
+),
+base_rows AS (
+  SELECT
+    v_accounting_month AS accounting_month_1,
+    d.billing_code,
+    d.billing_name,
+    a.electronic_publication_code,
+    d.book_title AS title,
+    d.list_price,
+    v_accounting_month AS accounting_month_2,
+    CASE TRIM(d.store_name)
+      WHEN 'Amazon' THEN 'Kindle'
+      WHEN 'Reader Store' THEN 'SonyReaderStore'
+      WHEN 'ブッコミ' THEN 'BookLive'
+      WHEN 'Apple' THEN 'iBookstore'
+      WHEN '紀伊國屋' THEN '紀伊國屋BookWebPlus'
+      ELSE d.store_name
+    END AS store_name,
+    d.sales_quantity,
+    d.value_code AS product_key,
+    d.row_number AS source_row_number,
+    d.source_file_id,
+    d.source_file_name,
+    d.loaded_at
+  FROM `{{ project_id }}.{{ source_dataset }}.source_ep_statement_detail` d
+  LEFT JOIN author_lookup a
+    ON d.value_code = a.product_key
+  WHERE d.target_month = v_target_month
+    -- Amazon POD is exported to the separate POD workbook.
+    AND TRIM(COALESCE(d.billing_code, '')) != '6191'
+),
+-- This row exists only in the legacy 2025-06 workbook and is not present in
+-- the monthly source sheet. Keep it isolated as an auditable one-off correction.
+legacy_manual_adjustments AS (
+  SELECT
+    '202506' AS accounting_month_1,
+    '6101' AS billing_code,
+    'シャープ株式会社' AS billing_name,
+    '8443943011000000100e' AS electronic_publication_code,
+    '怖いくらい通じる! 魔法のカタカナ英語 (1) 日常生活編' AS title,
+    CAST(0 AS NUMERIC) AS list_price,
+    '202505' AS accounting_month_2,
+    'GALAPAGOS' AS store_name,
+    CAST(0 AS NUMERIC) AS sales_quantity,
+    '01-3715106045' AS product_key,
+    CAST(NULL AS INT64) AS source_row_number,
+    CAST(NULL AS STRING) AS source_file_id,
+    'legacy_manual_adjustment' AS source_file_name,
+    CURRENT_TIMESTAMP() AS loaded_at
+  WHERE v_target_month = '2025-06'
 )
-SELECT
-  v_accounting_month AS accounting_month_1,
-  d.billing_code,
-  d.billing_name,
-  a.electronic_publication_code,
-  d.book_title AS title,
-  d.list_price,
-  v_accounting_month AS accounting_month_2,
-  d.store_name,
-  d.sales_quantity,
-  d.value_code AS product_key,
-  d.row_number AS source_row_number,
-  d.source_file_id,
-  d.source_file_name,
-  d.loaded_at
-FROM `{{ project_id }}.{{ source_dataset }}.source_ep_statement_detail` d
-LEFT JOIN author_lookup a
-  ON d.value_code = a.product_key
-WHERE d.target_month = v_target_month;
+SELECT * FROM base_rows
+UNION ALL
+SELECT * FROM legacy_manual_adjustments;
