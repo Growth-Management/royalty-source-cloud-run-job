@@ -277,6 +277,34 @@ jobs:
           echo "exit_code=${STATUS}" >> "${GITHUB_OUTPUT}"
           exit "${STATUS}"
 
+      - name: Validate required values and duplicate keys
+        id: constraint_validation
+        if: always() && steps.download.outcome == 'success'
+        shell: bash
+        run: |
+          set -euo pipefail
+          TARGET_MONTH="${{ steps.target.outputs.target_month }}"
+          ARTIFACT_DIR="artifacts/${TARGET_MONTH}"
+
+          set +e
+          python scripts/validate_output_constraints.py \
+            --access "${ARTIFACT_DIR}/comparison_access_input_${TARGET_MONTH}.xlsx" \
+            --pod "${ARTIFACT_DIR}/comparison_pod_input_${TARGET_MONTH}.xlsx" \
+            --project-id "${GCP_PROJECT_ID}" \
+            --dataset "${BQ_SOURCE_DATASET}" \
+            --location "${BQ_LOCATION}" \
+            --json-output "${ARTIFACT_DIR}/constraints_validation.json" \
+            --markdown-output "${ARTIFACT_DIR}/constraints_validation.md"
+          STATUS=$?
+          set -e
+
+          if [ -f "${ARTIFACT_DIR}/constraints_validation.md" ]; then
+            cat "${ARTIFACT_DIR}/constraints_validation.md" >> "${GITHUB_STEP_SUMMARY}"
+          fi
+
+          echo "exit_code=${STATUS}" >> "${GITHUB_OUTPUT}"
+          exit "${STATUS}"
+
       - name: Upload generated workbook artifacts
         if: always() && steps.download.outcome == 'success'
         uses: actions/upload-artifact@v4
@@ -319,6 +347,7 @@ jobs:
             echo "| Comparison execution | \`${COMPARISON_EXECUTION:-not started}\` |"
             echo "| Workbook download | \`${{ steps.download.outcome }}\` |"
             echo "| Workbook/BigQuery validation | \`${{ steps.workbook_validation.outcome }}\` |"
+            echo "| Required/duplicate validation | \`${{ steps.constraint_validation.outcome }}\` |"
             echo "| Artifact | \`generated-workbooks-${{ steps.target.outputs.target_month }}\` |"
             echo "| Restored default | \`EXPORT_OUTPUT_FILES=false\` |"
             if [ -n "${NORMAL_EXECUTION}" ]; then
