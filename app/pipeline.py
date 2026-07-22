@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
+import io
 import logging
 
 import pandas as pd
@@ -27,6 +28,14 @@ STAGING_TABLE_BY_KIND = {
     SourceKind.MONTHLY_PRODUCT_SALES: "staging_monthly_product_sales",
 }
 SOURCE_TABLES = ("source_product_master", "source_author_conditions", "source_ep_statement_detail", "source_monthly_product_sales")
+ACCESS_WORKBOOK_SHEETS = {
+    "sales": "access_input_sales",
+    "store_detail": "access_input_store_detail",
+    "author_conditions": "access_input_author_conditions",
+}
+POD_WORKBOOK_SHEETS = {
+    "pod_sales": "access_input_pod_sales",
+}
 
 
 @dataclass
@@ -50,6 +59,7 @@ class SourcePipeline:
     def __init__(self, settings: Settings):
         self.settings = settings
         self.drive = DriveClient(settings.drive_source_folder_id)
+        self.output_drive = DriveClient(settings.drive_output_folder_id)
         self.parser = WorkbookParser(settings.max_generic_columns)
         self.bq = BigQueryClient(settings.gcp_project_id, settings.bq_location)
         self.base_dir = Path(__file__).resolve().parents[1]
@@ -71,6 +81,8 @@ class SourcePipeline:
                 raise RuntimeError("SOURCE rows created is 0")
             if self.settings.fail_on_quality_errors and stats.source_quality_error_count > 0:
                 raise RuntimeError(f"Quality checks failed: {stats.source_quality_error_count} errors")
+            if self.settings.export_output_files:
+                self._export_comparison_workbooks(stats)
             stats.status = "SUCCESS"
             return stats
         except Exception as exc:
@@ -133,6 +145,37 @@ class SourcePipeline:
         self.bq.run_sql_file(self.base_dir / "sql" / "source_quality_checks.sql", replacements)
         rows = self.bq.run_sql_file(self.base_dir / "sql" / "access_input_quality_checks.sql", replacements)
         stats.source_quality_error_count = int(rows[0]["total_error_count"]) if rows else 0
+
+    def _export_comparison_workbooks(self, stats: AuditStats) -> None:
+        if not stats.target_month:
+            raise ValueError("target_month is required before comparison workbook export")
+        accounting_month = stats.target_month.replace("-", "")
+        access_file_name = f"comparison_access_input_{accounting_month}.xlsx"
+        pod_file_name = f"comparison_pod_input_{accounting_month}.xlsx"
+
+        access_payload = self._build_workbook(ACCESS_WORKBOOK_SHEETS)
+        pod_payload = self._build_workbook(POD_WORKBOOK_SHEETS)
+        access_file_id = self.output_drive.upload_excel(access_file_name, access_payload)
+        pod_file_id = self.output_drive.upload_excel(pod_file_name, pod_payload)
+        self.logger.info(
+            "comparison workbooks exported",
+            extra={
+                "run_id": stats.run_id,
+                "target_month": stats.target_month,
+                "access_file_name": access_file_name,
+                "access_file_id": access_file_id,
+                "pod_file_name": pod_file_name,
+                "pod_file_id": pod_file_id,
+            },
+        )
+
+    def _build_workbook(self, sheet_tables: dict[str, str]) -> bytes:
+        buffer = io.BytesIO()
+        with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+            for sheet_name, table_name in sheet_tables.items():
+                dataframe = self.bq.read_table_dataframe(self._table(self.settings.bq_source_dataset, table_name))
+                dataframe.to_excel(writer, sheet_name=sheet_name, index=False)
+        return buffer.getvalue()
 
     def _write_audit(self, stats: AuditStats) -> None:
         rows = stats.audit_rows + [self._audit_row(stats, None, None, stats.staging_rows_loaded, stats.raw_rows_loaded, stats.warning_count, stats.status)]
