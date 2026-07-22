@@ -16,8 +16,11 @@ SELECT
   source_file_id, source_file_name, source_sheet_name, loaded_at
 FROM `{{ project_id }}.{{ raw_dataset }}.raw_product_master`
 WHERE target_month = v_target_month
-  AND NULLIF(TRIM(product_code), '') IS NOT NULL
-  AND NULLIF(TRIM(title), '') IS NOT NULL
+  AND COALESCE(
+    NULLIF(TRIM(product_code), ''),
+    NULLIF(TRIM(title), ''),
+    NULLIF(TRIM(electronic_publication_code), '')
+  ) IS NOT NULL
 QUALIFY ROW_NUMBER() OVER (PARTITION BY source_file_id, source_sheet_name, row_number ORDER BY loaded_at DESC) = 1;
 
 CREATE OR REPLACE TABLE `{{ project_id }}.{{ source_dataset }}.source_author_conditions` AS
@@ -41,8 +44,12 @@ SELECT
   source_file_id, source_file_name, source_sheet_name, loaded_at
 FROM `{{ project_id }}.{{ raw_dataset }}.raw_author_conditions`
 WHERE target_month = v_target_month
-  AND NULLIF(TRIM(product_code), '') IS NOT NULL
-  AND NULLIF(TRIM(author_name), '') IS NOT NULL
+  AND COALESCE(
+    NULLIF(TRIM(product_code), ''),
+    NULLIF(TRIM(author_identifier_id), ''),
+    NULLIF(TRIM(author_name), ''),
+    NULLIF(TRIM(title), '')
+  ) IS NOT NULL
 QUALIFY ROW_NUMBER() OVER (PARTITION BY source_file_id, source_sheet_name, row_number ORDER BY loaded_at DESC) = 1;
 
 CREATE OR REPLACE TABLE `{{ project_id }}.{{ source_dataset }}.source_ep_statement_detail` AS
@@ -60,8 +67,12 @@ SELECT
   source_file_id, source_file_name, source_sheet_name, loaded_at
 FROM `{{ project_id }}.{{ raw_dataset }}.raw_ep_statement_detail`
 WHERE target_month = v_target_month
-  AND NULLIF(TRIM(electronic_publication_code), '') IS NOT NULL
-  AND NULLIF(TRIM(store_name), '') IS NOT NULL
+  AND COALESCE(
+    NULLIF(TRIM(electronic_publication_code), ''),
+    NULLIF(TRIM(book_title), ''),
+    NULLIF(TRIM(store_name), ''),
+    NULLIF(TRIM(value_code), '')
+  ) IS NOT NULL
 QUALIFY ROW_NUMBER() OVER (PARTITION BY source_file_id, source_sheet_name, row_number ORDER BY loaded_at DESC) = 1;
 
 CREATE OR REPLACE TABLE `{{ project_id }}.{{ source_dataset }}.source_monthly_product_sales` AS
@@ -97,4 +108,8 @@ SELECT
   NULLIF(TRIM(s.partner_company_name), '') AS partner_company_name,
   s.source_file_id, s.source_file_name, s.source_sheet_name, s.loaded_at
 FROM latest_raw s
-WHERE NULLIF(TRIM(s.product_code), '') IS NOT NULL;
+WHERE COALESCE(
+  NULLIF(TRIM(s.product_code), ''),
+  NULLIF(TRIM(s.product_name), ''),
+  NULLIF(TRIM(s.electronic_publication_code), '')
+) IS NOT NULL;
