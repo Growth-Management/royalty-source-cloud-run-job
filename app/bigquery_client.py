@@ -32,6 +32,14 @@ class BigQueryClient:
         rows = self.client.query(sql).result()
         return [dict(row.items()) for row in rows]
 
+    def query_dataframe(self, sql: str) -> pd.DataFrame:
+        """Run a query and return its complete result as a DataFrame."""
+        return self.client.query(sql).result().to_dataframe(create_bqstorage_client=False)
+
+    def read_table_dataframe(self, table_id: str) -> pd.DataFrame:
+        """Read a fully-qualified BigQuery table for file export."""
+        return self.query_dataframe(f"SELECT * FROM `{table_id}`")
+
     def run_sql_file(self, sql_path: str | Path, replacements: dict[str, str]) -> list[dict[str, Any]]:
         sql = Path(sql_path).read_text(encoding="utf-8")
         for key, value in replacements.items():
