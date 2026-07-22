@@ -16,6 +16,7 @@ class Settings(BaseModel):
     job_target_month: str | None = None
     log_level: str = "INFO"
     fail_on_quality_errors: bool = True
+    export_output_files: bool = False
     max_generic_columns: int = 40
 
     @classmethod
@@ -32,5 +33,6 @@ class Settings(BaseModel):
             job_target_month=os.getenv("JOB_TARGET_MONTH"),
             log_level=os.getenv("LOG_LEVEL", "INFO"),
             fail_on_quality_errors=os.getenv("FAIL_ON_QUALITY_ERRORS", "true").lower() in {"1", "true", "yes", "y"},
+            export_output_files=os.getenv("EXPORT_OUTPUT_FILES", "false").lower() in {"1", "true", "yes", "y"},
             max_generic_columns=int(os.getenv("MAX_GENERIC_COLUMNS", "40")),
         )
