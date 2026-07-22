@@ -2,55 +2,59 @@ DECLARE v_target_month STRING DEFAULT '{{ target_month }}';
 
 CREATE OR REPLACE TABLE `{{ project_id }}.{{ source_dataset }}.source_product_master` AS
 SELECT
-  target_month, row_number,
+  v_target_month AS target_month,
+  ROW_NUMBER() OVER (ORDER BY product_code) AS row_number,
   NULLIF(TRIM(product_code), '') AS product_code,
-  NULLIF(TRIM(base_isbn), '') AS base_isbn,
-  NULLIF(TRIM(electronic_publication_code), '') AS electronic_publication_code,
-  NULLIF(TRIM(planning_editor), '') AS planning_editor,
-  COALESCE(SAFE.PARSE_DATE('%Y/%m/%d', sales_start_date), SAFE.PARSE_DATE('%Y-%m-%d', sales_start_date), SAFE.PARSE_DATE('%Y%m%d', sales_start_date)) AS sales_start_date,
+  NULLIF(TRIM(base_isbn_13), '') AS base_isbn,
+  NULLIF(TRIM(e_publishing_code), '') AS electronic_publication_code,
+  NULLIF(TRIM(planning_edit), '') AS planning_editor,
+  sales_start_date,
   NULLIF(TRIM(title), '') AS title,
-  NULLIF(TRIM(subtitle), '') AS subtitle,
-  SAFE_CAST(REGEXP_REPLACE(price, r'[,￥¥ ]', '') AS NUMERIC) AS price,
-  NULLIF(TRIM(isbn), '') AS isbn,
+  NULLIF(TRIM(subtitle_suffix), '') AS subtitle,
+  price_excluding_tax AS price,
+  NULLIF(TRIM(isbn_13), '') AS isbn,
   NULLIF(TRIM(author), '') AS author,
-  source_file_id, source_file_name, source_sheet_name, loaded_at
-FROM `{{ project_id }}.{{ raw_dataset }}.raw_product_master`
-WHERE target_month = v_target_month
-  AND COALESCE(
-    NULLIF(TRIM(product_code), ''),
-    NULLIF(TRIM(title), ''),
-    NULLIF(TRIM(electronic_publication_code), '')
-  ) IS NOT NULL
-QUALIFY ROW_NUMBER() OVER (PARTITION BY source_file_id, source_sheet_name, row_number ORDER BY loaded_at DESC) = 1;
+  CAST(NULL AS STRING) AS source_file_id,
+  'ice_qb_aggregation.sf_biblio_product_master' AS source_file_name,
+  CAST(NULL AS STRING) AS source_sheet_name,
+  CURRENT_TIMESTAMP() AS loaded_at
+FROM `{{ project_id }}.ice_qb_aggregation.sf_biblio_product_master`
+WHERE COALESCE(
+  NULLIF(TRIM(product_code), ''),
+  NULLIF(TRIM(title), ''),
+  NULLIF(TRIM(e_publishing_code), '')
+) IS NOT NULL;
 
 CREATE OR REPLACE TABLE `{{ project_id }}.{{ source_dataset }}.source_author_conditions` AS
 SELECT
-  target_month, row_number,
+  v_target_month AS target_month,
+  ROW_NUMBER() OVER (ORDER BY product_code, contributor_id, contributor_role_code) AS row_number,
   NULLIF(TRIM(product_code), '') AS product_code,
-  NULLIF(TRIM(electronic_publication_code), '') AS electronic_publication_code,
-  NULLIF(TRIM(author_identifier_id), '') AS author_identifier_id,
+  NULLIF(TRIM(e_publishing_code), '') AS electronic_publication_code,
+  NULLIF(TRIM(contributor_id), '') AS author_identifier_id,
   NULLIF(TRIM(title), '') AS title,
-  NULLIF(TRIM(planning_editor), '') AS planning_editor,
-  NULLIF(TRIM(author_category), '') AS author_category,
+  NULLIF(TRIM(planning_edit), '') AS planning_editor,
+  NULLIF(TRIM(contributor_role), '') AS author_category,
   NULLIF(TRIM(payee_code), '') AS payee_code,
-  NULLIF(TRIM(author_name), '') AS author_name,
+  NULLIF(TRIM(contributor_name), '') AS author_name,
   NULLIF(TRIM(payee_name), '') AS payee_name,
-  SAFE_CAST(REGEXP_REPLACE(initial_royalty_rate, r'[%％, ]', '') AS NUMERIC) AS initial_royalty_rate,
-  SAFE_CAST(REGEXP_REPLACE(revised_royalty_rate, r'[%％, ]', '') AS NUMERIC) AS revised_royalty_rate,
-  SAFE_CAST(REGEXP_REPLACE(revised_rate_sales_quantity, r'[, ]', '') AS INT64) AS revised_rate_sales_quantity,
-  SAFE_CAST(REGEXP_REPLACE(revised_rate_sales_amount, r'[,￥¥ ]', '') AS NUMERIC) AS revised_rate_sales_amount,
-  SAFE_CAST(REGEXP_REPLACE(payment_hold_limit_amount, r'[,￥¥ ]', '') AS NUMERIC) AS payment_hold_limit_amount,
-  NULLIF(TRIM(withholding_tax_type), '') AS withholding_tax_type,
-  source_file_id, source_file_name, source_sheet_name, loaded_at
-FROM `{{ project_id }}.{{ raw_dataset }}.raw_author_conditions`
-WHERE target_month = v_target_month
-  AND COALESCE(
-    NULLIF(TRIM(product_code), ''),
-    NULLIF(TRIM(author_identifier_id), ''),
-    NULLIF(TRIM(author_name), ''),
-    NULLIF(TRIM(title), '')
-  ) IS NOT NULL
-QUALIFY ROW_NUMBER() OVER (PARTITION BY source_file_id, source_sheet_name, row_number ORDER BY loaded_at DESC) = 1;
+  royalty_rate_initial AS initial_royalty_rate,
+  royalty_rate_after_change AS revised_royalty_rate,
+  SAFE_CAST(royalty_change_sales_quantity AS INT64) AS revised_rate_sales_quantity,
+  royalty_change_sales_amount AS revised_rate_sales_amount,
+  royalty_reservation_upper_limit AS payment_hold_limit_amount,
+  NULLIF(TRIM(tax_withholding_type), '') AS withholding_tax_type,
+  CAST(NULL AS STRING) AS source_file_id,
+  'ice_qb_aggregation.sf_biblio_contributor_conditions' AS source_file_name,
+  CAST(NULL AS STRING) AS source_sheet_name,
+  CURRENT_TIMESTAMP() AS loaded_at
+FROM `{{ project_id }}.ice_qb_aggregation.sf_biblio_contributor_conditions`
+WHERE COALESCE(
+  NULLIF(TRIM(product_code), ''),
+  NULLIF(TRIM(contributor_id), ''),
+  NULLIF(TRIM(contributor_name), ''),
+  NULLIF(TRIM(title), '')
+) IS NOT NULL;
 
 CREATE OR REPLACE TABLE `{{ project_id }}.{{ source_dataset }}.source_ep_statement_detail` AS
 SELECT
