@@ -12,6 +12,11 @@ on:
         required: true
         default: true
         type: boolean
+      export_output_files:
+        description: "Export comparison workbooks to Google Drive"
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -67,7 +72,7 @@ jobs:
           gcloud run jobs update "${CLOUD_RUN_JOB}" \
             --project "${GCP_PROJECT_ID}" \
             --region "${CLOUD_RUN_REGION}" \
-            --update-env-vars "JOB_TARGET_MONTH=${{ inputs.target_month }},FAIL_ON_QUALITY_ERRORS=${{ inputs.fail_on_quality_errors }}" \
+            --update-env-vars "JOB_TARGET_MONTH=${{ inputs.target_month }},FAIL_ON_QUALITY_ERRORS=${{ inputs.fail_on_quality_errors }},EXPORT_OUTPUT_FILES=${{ inputs.export_output_files }}" \
             --quiet
 
       - name: Execute and wait
@@ -113,6 +118,7 @@ jobs:
             echo "| Job | \`${CLOUD_RUN_JOB}\` |"
             echo "| Target month | \`${{ inputs.target_month }}\` |"
             echo "| Fail on quality errors | \`${{ inputs.fail_on_quality_errors }}\` |"
+            echo "| Export comparison workbooks | \`${{ inputs.export_output_files }}\` |"
             if [ -n "${EXECUTION_NAME}" ]; then
               echo "| Execution | \`${EXECUTION_NAME}\` |"
               echo ""
