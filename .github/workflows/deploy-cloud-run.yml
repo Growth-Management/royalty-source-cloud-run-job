@@ -2,11 +2,6 @@ name: Deploy Cloud Run Job
 
 on:
   workflow_dispatch:
-    inputs:
-      target_month:
-        description: "Optional JOB_TARGET_MONTH override, for example 202506"
-        required: false
-        type: string
   push:
     branches:
       - main
@@ -61,11 +56,7 @@ jobs:
 
       - name: Deploy Cloud Run Job
         run: |
-          TARGET_MONTH="${{ inputs.target_month }}"
           ENV_VARS="GCP_PROJECT_ID=${GCP_PROJECT_ID},BQ_STAGING_DATASET=${BQ_STAGING_DATASET},BQ_RAW_DATASET=${BQ_RAW_DATASET},BQ_SOURCE_DATASET=${BQ_SOURCE_DATASET},BQ_AUDIT_DATASET=${BQ_AUDIT_DATASET},BQ_LOCATION=${BQ_LOCATION},DRIVE_SOURCE_FOLDER_ID=${DRIVE_SOURCE_FOLDER_ID},LOG_LEVEL=INFO,FAIL_ON_QUALITY_ERRORS=true,MAX_GENERIC_COLUMNS=40"
-          if [ -n "${TARGET_MONTH}" ]; then
-            ENV_VARS="${ENV_VARS},JOB_TARGET_MONTH=${TARGET_MONTH}"
-          fi
 
           gcloud run jobs deploy "${CLOUD_RUN_JOB}" \
             --image "${IMAGE_URI}" \
@@ -84,4 +75,4 @@ jobs:
           gcloud run jobs describe "${CLOUD_RUN_JOB}" \
             --project "${GCP_PROJECT_ID}" \
             --region "${CLOUD_RUN_REGION}" \
-            --format="value(metadata.name,spec.template.template.spec.containers[0].image)"
+            --format="table(metadata.name,spec.template.template.spec.containers[0].image,status.conditions[0].status)"
