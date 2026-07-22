@@ -70,7 +70,7 @@ class SourcePipeline:
                 stats.source_quality_error_count += 1
                 raise RuntimeError("SOURCE rows created is 0")
             if self.settings.fail_on_quality_errors and stats.source_quality_error_count > 0:
-                raise RuntimeError(f"SOURCE quality checks failed: {stats.source_quality_error_count} errors")
+                raise RuntimeError(f"Quality checks failed: {stats.source_quality_error_count} errors")
             stats.status = "SUCCESS"
             return stats
         except Exception as exc:
@@ -129,7 +129,9 @@ class SourcePipeline:
     def _run_quality_checks(self, stats: AuditStats) -> None:
         if not stats.target_month:
             raise ValueError("target_month is required before quality checks")
-        rows = self.bq.run_sql_file(self.base_dir / "sql" / "source_quality_checks.sql", self._sql_replacements(stats.target_month) | {"run_id": stats.run_id})
+        replacements = self._sql_replacements(stats.target_month) | {"run_id": stats.run_id}
+        self.bq.run_sql_file(self.base_dir / "sql" / "source_quality_checks.sql", replacements)
+        rows = self.bq.run_sql_file(self.base_dir / "sql" / "access_input_quality_checks.sql", replacements)
         stats.source_quality_error_count = int(rows[0]["total_error_count"]) if rows else 0
 
     def _write_audit(self, stats: AuditStats) -> None:
