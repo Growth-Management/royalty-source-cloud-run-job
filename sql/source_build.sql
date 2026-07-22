@@ -92,14 +92,9 @@ SELECT
   SAFE_CAST(REGEXP_REPLACE(s.sales_amount, r'[,￥¥ ]', '') AS NUMERIC) AS sales_amount,
   SAFE_CAST(REGEXP_REPLACE(s.tax_amount, r'[,￥¥ ]', '') AS NUMERIC) AS tax_amount,
   NULLIF(TRIM(s.tax_type), '') AS tax_type,
-  COALESCE(NULLIF(TRIM(s.electronic_publication_code), ''), pm.electronic_publication_code) AS electronic_publication_code,
+  NULLIF(TRIM(s.electronic_publication_code), '') AS electronic_publication_code,
   NULLIF(TRIM(s.partner_company_code), '') AS partner_company_code,
   NULLIF(TRIM(s.partner_company_name), '') AS partner_company_name,
-  pm.title AS matched_product_title,
-  pm.author AS matched_author,
   s.source_file_id, s.source_file_name, s.source_sheet_name, s.loaded_at
 FROM latest_raw s
-LEFT JOIN `{{ project_id }}.{{ source_dataset }}.source_product_master` pm
-  ON NULLIF(TRIM(s.product_code), '') = pm.product_code
- AND s.target_month = pm.target_month
 WHERE NULLIF(TRIM(s.product_code), '') IS NOT NULL;
