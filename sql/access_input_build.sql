@@ -91,7 +91,15 @@ SELECT
   s.loaded_at
 FROM `{{ project_id }}.{{ source_dataset }}.source_monthly_product_sales` s
 LEFT JOIN author_lookup a USING (product_key)
-WHERE s.target_month = v_target_month;
+WHERE s.target_month = v_target_month
+  -- POD sales are exported to the separate Amazon POD workbook.
+  AND COALESCE(TRIM(s.product_type_name), '') != 'POD'
+  -- The legacy workbook manually removes Amazon partner 941 return adjustments.
+  AND NOT (
+    TRIM(COALESCE(s.partner_company_code, '')) = '941'
+    AND COALESCE(s.sales_quantity, 0) = 0
+    AND COALESCE(s.sales_amount, 0) < 0
+  );
 
 CREATE OR REPLACE TABLE `{{ project_id }}.{{ source_dataset }}.access_input_store_detail` AS
 WITH author_lookup AS (
