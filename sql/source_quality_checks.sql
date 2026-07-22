@@ -27,14 +27,14 @@ WITH checks AS (
   FROM `{{ project_id }}.{{ source_dataset }}.source_monthly_product_sales` WHERE target_month = v_target_month
   UNION ALL
   SELECT 'monthly_sales_product_master_unmatched', 'ERROR', 'source_monthly_product_sales', COUNTIF(pm.product_code IS NULL),
-    TO_JSON_STRING(ARRAY_AGG(STRUCT(s.product_code, s.product_name) LIMIT 5))
+    TO_JSON_STRING(ARRAY_AGG(IF(pm.product_code IS NULL, STRUCT(s.product_code, s.product_name), NULL) IGNORE NULLS LIMIT 5))
   FROM `{{ project_id }}.{{ source_dataset }}.source_monthly_product_sales` s
   LEFT JOIN `{{ project_id }}.{{ source_dataset }}.source_product_master` pm
     ON s.product_code = pm.product_code AND s.target_month = pm.target_month
   WHERE s.target_month = v_target_month
   UNION ALL
   SELECT 'monthly_sales_author_conditions_unmatched', 'ERROR', 'source_monthly_product_sales', COUNTIF(ac.product_code IS NULL),
-    TO_JSON_STRING(ARRAY_AGG(STRUCT(s.product_code, s.electronic_publication_code) LIMIT 5))
+    TO_JSON_STRING(ARRAY_AGG(IF(ac.product_code IS NULL, STRUCT(s.product_code, s.electronic_publication_code), NULL) IGNORE NULLS LIMIT 5))
   FROM `{{ project_id }}.{{ source_dataset }}.source_monthly_product_sales` s
   LEFT JOIN `{{ project_id }}.{{ source_dataset }}.source_author_conditions` ac
     ON s.product_code = ac.product_code AND s.target_month = ac.target_month
