@@ -117,6 +117,9 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v2
         with:
@@ -125,6 +128,20 @@ jobs:
 
       - name: Set up gcloud
         uses: google-github-actions/setup-gcloud@v2
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install validation dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install \
+            google-api-python-client>=2.149.0 \
+            google-auth>=2.35.0 \
+            openpyxl>=3.1.5
 
       - name: Resolve target month
         id: target
@@ -212,6 +229,59 @@ jobs:
             --region "${CLOUD_RUN_REGION}" \
             --format="yaml(metadata.name,status.succeededCount,status.failedCount,status.conditions)"
 
+      - name: Download generated workbooks from Drive
+        id: download
+        shell: bash
+        run: |
+          set -euo pipefail
+          TARGET_MONTH="${{ steps.target.outputs.target_month }}"
+          mkdir -p "artifacts/${TARGET_MONTH}"
+
+          python scripts/download_drive_file.py \
+            --folder-id "${DRIVE_OUTPUT_FOLDER_ID}" \
+            --name "comparison_access_input_${TARGET_MONTH}.xlsx" \
+            --output "artifacts/${TARGET_MONTH}/comparison_access_input_${TARGET_MONTH}.xlsx"
+
+          python scripts/download_drive_file.py \
+            --folder-id "${DRIVE_OUTPUT_FOLDER_ID}" \
+            --name "comparison_pod_input_${TARGET_MONTH}.xlsx" \
+            --output "artifacts/${TARGET_MONTH}/comparison_pod_input_${TARGET_MONTH}.xlsx"
+
+          echo "artifact_dir=artifacts/${TARGET_MONTH}" >> "${GITHUB_OUTPUT}"
+
+      - name: Validate generated workbooks
+        id: workbook_validation
+        shell: bash
+        run: |
+          set -euo pipefail
+          TARGET_MONTH="${{ steps.target.outputs.target_month }}"
+          ARTIFACT_DIR="artifacts/${TARGET_MONTH}"
+
+          set +e
+          python scripts/validate_output_workbooks.py \
+            --access "${ARTIFACT_DIR}/comparison_access_input_${TARGET_MONTH}.xlsx" \
+            --pod "${ARTIFACT_DIR}/comparison_pod_input_${TARGET_MONTH}.xlsx" \
+            --json-output "${ARTIFACT_DIR}/validation.json" \
+            --markdown-output "${ARTIFACT_DIR}/validation.md"
+          STATUS=$?
+          set -e
+
+          if [ -f "${ARTIFACT_DIR}/validation.md" ]; then
+            cat "${ARTIFACT_DIR}/validation.md" >> "${GITHUB_STEP_SUMMARY}"
+          fi
+
+          echo "exit_code=${STATUS}" >> "${GITHUB_OUTPUT}"
+          exit "${STATUS}"
+
+      - name: Upload generated workbook artifacts
+        if: always() && steps.download.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: generated-workbooks-${{ steps.target.outputs.target_month }}
+          path: ${{ steps.download.outputs.artifact_dir }}
+          if-no-files-found: error
+          retention-days: 30
+
       - name: Restore safe default
         if: always()
         shell: bash
@@ -243,6 +313,9 @@ jobs:
             echo "| Normal execution | \`${NORMAL_EXECUTION:-not started}\` |"
             echo "| Comparison export flag | \`true\` |"
             echo "| Comparison execution | \`${COMPARISON_EXECUTION:-not started}\` |"
+            echo "| Workbook download | \`${{ steps.download.outcome }}\` |"
+            echo "| Workbook validation | \`${{ steps.workbook_validation.outcome }}\` |"
+            echo "| Artifact | \`generated-workbooks-${{ steps.target.outputs.target_month }}\` |"
             echo "| Restored default | \`EXPORT_OUTPUT_FILES=false\` |"
             if [ -n "${NORMAL_EXECUTION}" ]; then
               echo ""
