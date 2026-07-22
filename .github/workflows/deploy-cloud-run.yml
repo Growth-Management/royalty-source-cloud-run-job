@@ -5,75 +5,15 @@ on:
   push:
     branches:
       - main
+      - fix/quality-check-samples
 
 permissions:
   contents: read
   id-token: write
 
+concurrency:
+  group: deploy-cloud-run-job-${{ github.ref }}
+  cancel-in-progress: false
+
 env:
-  GCP_PROJECT_ID: ice-qb
-  GAR_LOCATION: asia-northeast1
-  GAR_REPOSITORY: royalty-source
-  IMAGE_NAME: royalty-source-job
-  CLOUD_RUN_JOB: royalty-source-job
-  CLOUD_RUN_REGION: asia-northeast1
-  BQ_STAGING_DATASET: royalty_staging
-  BQ_RAW_DATASET: royalty_raw
-  BQ_SOURCE_DATASET: royalty_source
-  BQ_AUDIT_DATASET: royalty_audit
-  BQ_LOCATION: asia-northeast1
-  DRIVE_SOURCE_FOLDER_ID: 1I9sBj6LYyaRPy1LcOWdQ3mDtJA-HDAQN
-  DRIVE_OUTPUT_FOLDER_ID: 1zlmvNdJK3u8w0cQdBWCfZSxX7VpSTwzH
-
-jobs:
-  deploy:
-    name: Build and deploy Cloud Run Job
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Authenticate to Google Cloud
-        uses: google-github-actions/auth@v2
-        with:
-          workload_identity_provider: ${{ secrets.GCP_DEPLOY_WORKLOAD_IDENTITY_PROVIDER }}
-          service_account: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT }}
-
-      - name: Set up gcloud
-        uses: google-github-actions/setup-gcloud@v2
-
-      - name: Configure Docker auth
-        run: gcloud auth configure-docker "${GAR_LOCATION}-docker.pkg.dev" --quiet
-
-      - name: Build image
-        run: |
-          IMAGE_URI="${GAR_LOCATION}-docker.pkg.dev/${GCP_PROJECT_ID}/${GAR_REPOSITORY}/${IMAGE_NAME}:${GITHUB_SHA}"
-          docker build --no-cache -t "${IMAGE_URI}" .
-          echo "IMAGE_URI=${IMAGE_URI}" >> "${GITHUB_ENV}"
-
-      - name: Push image
-        run: docker push "${IMAGE_URI}"
-
-      - name: Deploy Cloud Run Job
-        run: |
-          ENV_VARS="GCP_PROJECT_ID=${GCP_PROJECT_ID},BQ_STAGING_DATASET=${BQ_STAGING_DATASET},BQ_RAW_DATASET=${BQ_RAW_DATASET},BQ_SOURCE_DATASET=${BQ_SOURCE_DATASET},BQ_AUDIT_DATASET=${BQ_AUDIT_DATASET},BQ_LOCATION=${BQ_LOCATION},DRIVE_SOURCE_FOLDER_ID=${DRIVE_SOURCE_FOLDER_ID},DRIVE_OUTPUT_FOLDER_ID=${DRIVE_OUTPUT_FOLDER_ID},LOG_LEVEL=INFO,FAIL_ON_QUALITY_ERRORS=true,MAX_GENERIC_COLUMNS=40"
-
-          gcloud run jobs deploy "${CLOUD_RUN_JOB}" \
-            --image "${IMAGE_URI}" \
-            --project "${GCP_PROJECT_ID}" \
-            --region "${CLOUD_RUN_REGION}" \
-            --service-account "${{ vars.CLOUD_RUN_RUNTIME_SERVICE_ACCOUNT }}" \
-            --set-env-vars "${ENV_VARS}" \
-            --memory 2Gi \
-            --cpu 1 \
-            --task-timeout 3600 \
-            --max-retries 0 \
-            --quiet
-
-      - name: Verify deployed job
-        run: |
-          gcloud run jobs describe "${CLOUD_RUN_JOB}" \
-            --project "${GCP_PROJECT_ID}" \
-            --region "${CLOUD_RUN_REGION}" \
-            --format="table(metadata.name,spec.template.template.spec.containers[0].image,status.conditions[0].status)"
+  GCP_PROJECT_ID: ice
