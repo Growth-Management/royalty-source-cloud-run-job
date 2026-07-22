@@ -305,6 +305,34 @@ jobs:
           echo "exit_code=${STATUS}" >> "${GITHUB_OUTPUT}"
           exit "${STATUS}"
 
+      - name: Export pipeline audit summary
+        id: audit_summary
+        if: always() && steps.comparison.outcome == 'success'
+        shell: bash
+        run: |
+          set -euo pipefail
+          TARGET_MONTH="${{ steps.target.outputs.target_month }}"
+          ARTIFACT_DIR="artifacts/${TARGET_MONTH}"
+          mkdir -p "${ARTIFACT_DIR}"
+
+          set +e
+          python scripts/export_audit_summary.py \
+            --project-id "${GCP_PROJECT_ID}" \
+            --dataset "${BQ_AUDIT_DATASET}" \
+            --target-month "${TARGET_MONTH}" \
+            --location "${BQ_LOCATION}" \
+            --json-output "${ARTIFACT_DIR}/audit_summary.json" \
+            --markdown-output "${ARTIFACT_DIR}/audit_summary.md"
+          STATUS=$?
+          set -e
+
+          if [ -f "${ARTIFACT_DIR}/audit_summary.md" ]; then
+            cat "${ARTIFACT_DIR}/audit_summary.md" >> "${GITHUB_STEP_SUMMARY}"
+          fi
+
+          echo "exit_code=${STATUS}" >> "${GITHUB_OUTPUT}"
+          exit "${STATUS}"
+
       - name: Upload generated workbook artifacts
         if: always() && steps.download.outcome == 'success'
         uses: actions/upload-artifact@v4
@@ -348,6 +376,7 @@ jobs:
             echo "| Workbook download | \`${{ steps.download.outcome }}\` |"
             echo "| Workbook/BigQuery validation | \`${{ steps.workbook_validation.outcome }}\` |"
             echo "| Required/duplicate validation | \`${{ steps.constraint_validation.outcome }}\` |"
+            echo "| Pipeline audit summary | \`${{ steps.audit_summary.outcome }}\` |"
             echo "| Artifact | \`generated-workbooks-${{ steps.target.outputs.target_month }}\` |"
             echo "| Restored default | \`EXPORT_OUTPUT_FILES=false\` |"
             if [ -n "${NORMAL_EXECUTION}" ]; then
