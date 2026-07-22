@@ -39,6 +39,16 @@ Runtime service account:
 - BigQuery dataset/table 作成と書き込みに必要な権限
 - 必要に応じて Cloud Logging writer
 
+## Initial deploy checklist
+
+初回 deploy 前に次を確認します。
+
+- GitHub secrets `GCP_DEPLOY_WORKLOAD_IDENTITY_PROVIDER` と `GCP_DEPLOY_SERVICE_ACCOUNT` が設定済み
+- GitHub variable `CLOUD_RUN_RUNTIME_SERVICE_ACCOUNT` が設定済み
+- Artifact Registry repository `royalty-source` が `asia-northeast1` に作成済み
+- Workload Identity provider condition が repository `Growth-Management/royalty-source-cloud-run-job`、branch `main`、workflow `Deploy Cloud Run Job` を許可している
+- Runtime service account `royalty-source-runner@ice-qb.iam.gserviceaccount.com` に Drive source folder Viewer と BigQuery 書き込み権限がある
+
 ## Deploy
 
 通常は `main` への push または GitHub Actions の手動実行で deploy します。
