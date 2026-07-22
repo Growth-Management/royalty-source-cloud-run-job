@@ -64,6 +64,7 @@ class SourcePipeline:
             for drive_file in files:
                 self._process_file(stats, drive_file)
             self._build_source(stats)
+            self._build_access_equivalent_tables(stats)
             self._run_quality_checks(stats)
             if stats.source_rows_created == 0:
                 stats.source_quality_error_count += 1
@@ -117,6 +118,13 @@ class SourcePipeline:
             raise ValueError("target_month is required before SOURCE build")
         self.bq.run_sql_file(self.base_dir / "sql" / "source_build.sql", self._sql_replacements(stats.target_month))
         stats.source_rows_created = sum(self.bq.count_rows(self._table(self.settings.bq_source_dataset, table), stats.target_month) for table in SOURCE_TABLES)
+
+    def _build_access_equivalent_tables(self, stats: AuditStats) -> None:
+        if not stats.target_month:
+            raise ValueError("target_month is required before Access-equivalent table build")
+        replacements = self._sql_replacements(stats.target_month)
+        self.bq.run_sql_file(self.base_dir / "sql" / "access_input_build.sql", replacements)
+        self.bq.run_sql_file(self.base_dir / "sql" / "pod_input_build.sql", replacements)
 
     def _run_quality_checks(self, stats: AuditStats) -> None:
         if not stats.target_month:
