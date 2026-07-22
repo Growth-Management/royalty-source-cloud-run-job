@@ -8,6 +8,9 @@ import re
 from typing import Iterable
 
 
+EXCEL_MIME_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
 class SourceKind(StrEnum):
     PRODUCT_MASTER = "product_master"
     AUTHOR_CONDITIONS = "author_conditions"
@@ -61,7 +64,7 @@ class DriveClient:
         if drive_file.mime_type == "application/vnd.google-apps.spreadsheet":
             request = self.service.files().export_media(
                 fileId=drive_file.file_id,
-                mimeType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                mimeType=EXCEL_MIME_TYPE,
             )
         else:
             request = self.service.files().get_media(fileId=drive_file.file_id)
@@ -71,6 +74,45 @@ class DriveClient:
         while not done:
             _, done = downloader.next_chunk()
         return buffer.getvalue()
+
+    def upload_excel(self, file_name: str, payload: bytes) -> str:
+        from googleapiclient.http import MediaIoBaseUpload
+
+        media = MediaIoBaseUpload(io.BytesIO(payload), mimetype=EXCEL_MIME_TYPE, resumable=True)
+        existing = self._find_file_by_name(file_name)
+        if existing:
+            result = self.service.files().update(
+                fileId=existing["id"],
+                media_body=media,
+                fields="id",
+                supportsAllDrives=True,
+            ).execute()
+        else:
+            result = self.service.files().create(
+                body={"name": file_name, "parents": [self.folder_id]},
+                media_body=media,
+                fields="id",
+                supportsAllDrives=True,
+            ).execute()
+        return result["id"]
+
+    def _find_file_by_name(self, file_name: str) -> dict | None:
+        escaped_name = file_name.replace("'", "\\'")
+        query = (
+            f"'{self.folder_id}' in parents and trashed = false "
+            f"and name = '{escaped_name}' and mimeType != 'application/vnd.google-apps.folder'"
+        )
+        response = self.service.files().list(
+            q=query,
+            fields="files(id, name, modifiedTime)",
+            supportsAllDrives=True,
+            includeItemsFromAllDrives=True,
+            pageSize=10,
+        ).execute()
+        files = response.get("files", [])
+        if not files:
+            return None
+        return max(files, key=lambda item: _parse_time(item.get("modifiedTime")))
 
     def _list_folder_files(self) -> list[dict]:
         query = f"'{self.folder_id}' in parents and trashed = false and mimeType != 'application/vnd.google-apps.folder'"
