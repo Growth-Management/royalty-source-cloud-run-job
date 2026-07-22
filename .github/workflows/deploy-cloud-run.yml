@@ -141,6 +141,7 @@ jobs:
           python -m pip install \
             google-api-python-client>=2.149.0 \
             google-auth>=2.35.0 \
+            google-cloud-bigquery>=3.25.0 \
             openpyxl>=3.1.5
 
       - name: Resolve target month
@@ -249,7 +250,7 @@ jobs:
 
           echo "artifact_dir=artifacts/${TARGET_MONTH}" >> "${GITHUB_OUTPUT}"
 
-      - name: Validate generated workbooks
+      - name: Validate generated workbooks against BigQuery
         id: workbook_validation
         shell: bash
         run: |
@@ -261,6 +262,9 @@ jobs:
           python scripts/validate_output_workbooks.py \
             --access "${ARTIFACT_DIR}/comparison_access_input_${TARGET_MONTH}.xlsx" \
             --pod "${ARTIFACT_DIR}/comparison_pod_input_${TARGET_MONTH}.xlsx" \
+            --project-id "${GCP_PROJECT_ID}" \
+            --dataset "${BQ_SOURCE_DATASET}" \
+            --location "${BQ_LOCATION}" \
             --json-output "${ARTIFACT_DIR}/validation.json" \
             --markdown-output "${ARTIFACT_DIR}/validation.md"
           STATUS=$?
@@ -314,7 +318,7 @@ jobs:
             echo "| Comparison export flag | \`true\` |"
             echo "| Comparison execution | \`${COMPARISON_EXECUTION:-not started}\` |"
             echo "| Workbook download | \`${{ steps.download.outcome }}\` |"
-            echo "| Workbook validation | \`${{ steps.workbook_validation.outcome }}\` |"
+            echo "| Workbook/BigQuery validation | \`${{ steps.workbook_validation.outcome }}\` |"
             echo "| Artifact | \`generated-workbooks-${{ steps.target.outputs.target_month }}\` |"
             echo "| Restored default | \`EXPORT_OUTPUT_FILES=false\` |"
             if [ -n "${NORMAL_EXECUTION}" ]; then
