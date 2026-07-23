@@ -127,7 +127,7 @@ WITH checks AS (
     'access_input_store_detail_202506_manual_adjustment_count',
     'ERROR',
     'access_input_store_detail',
-    IF(v_target_month = '2025-06', ABS(COUNTIF(source_file_name = 'legacy_manual_adjustment') - 1), COUNTIF(source_file_name = 'legacy_manual_adjustment')),
+    IF(v_accounting_month = '202506', ABS(COUNTIF(source_file_name = 'legacy_manual_adjustment') - 1), COUNTIF(source_file_name = 'legacy_manual_adjustment')),
     TO_JSON_STRING(ARRAY_AGG(IF(source_file_name = 'legacy_manual_adjustment',
       STRUCT(accounting_month_1, billing_code, store_name, product_key), NULL) IGNORE NULLS LIMIT 5))
   FROM `{{ project_id }}.{{ source_dataset }}.access_input_store_detail`
