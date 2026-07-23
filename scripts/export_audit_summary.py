@@ -22,11 +22,16 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def normalized_target_month(value: str) -> str:
+def target_month_candidates(value: str) -> list[str]:
     value = value.strip()
+    candidates = [value]
     if len(value) == 6 and value.isdigit():
-        return f"{value[:4]}-{value[4:]}"
-    return value
+        candidates.append(f"{value[:4]}-{value[4:]}")
+    elif len(value) == 7 and value[4] == "-":
+        compact = value.replace("-", "")
+        if len(compact) == 6 and compact.isdigit():
+            candidates.append(compact)
+    return list(dict.fromkeys(candidates))
 
 
 def json_value(value: Any) -> Any:
@@ -36,18 +41,18 @@ def json_value(value: Any) -> Any:
 
 
 def fetch_latest_audit(
-    client: bigquery.Client, project_id: str, dataset: str, target_month: str, location: str
+    client: bigquery.Client, project_id: str, dataset: str, target_months: list[str], location: str
 ) -> dict[str, Any] | None:
     sql = f"""
       SELECT *
       FROM `{project_id}.{dataset}.pipeline_audit_log`
-      WHERE target_month = @target_month
+      WHERE target_month IN UNNEST(@target_months)
         AND source_kind IS NULL
       ORDER BY finished_at DESC, started_at DESC
       LIMIT 1
     """
     config = bigquery.QueryJobConfig(
-        query_parameters=[bigquery.ScalarQueryParameter("target_month", "STRING", target_month)]
+        query_parameters=[bigquery.ArrayQueryParameter("target_months", "STRING", target_months)]
     )
     rows = list(client.query(sql, job_config=config, location=location).result())
     return {key: json_value(value) for key, value in rows[0].items()} if rows else None
@@ -132,9 +137,9 @@ def build_markdown(report: dict[str, Any]) -> str:
 
 def main() -> None:
     args = parse_args()
-    target_month = normalized_target_month(args.target_month)
+    target_months = target_month_candidates(args.target_month)
     client = bigquery.Client(project=args.project_id, location=args.location)
-    audit = fetch_latest_audit(client, args.project_id, args.dataset, target_month, args.location)
+    audit = fetch_latest_audit(client, args.project_id, args.dataset, target_months, args.location)
     quality_results = (
         fetch_quality_results(client, args.project_id, args.dataset, audit["run_id"], args.location)
         if audit
@@ -154,7 +159,9 @@ def main() -> None:
     )
     report = {
         "ok": ok,
-        "target_month": target_month,
+        "target_month": audit.get("target_month") if audit else target_months[0],
+        "requested_target_month": args.target_month,
+        "target_month_candidates": target_months,
         "audit": audit,
         "quality_error_count": quality_error_count,
         "quality_result_count": len(quality_results),
