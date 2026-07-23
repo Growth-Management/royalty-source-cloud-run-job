@@ -2,64 +2,47 @@ DECLARE v_target_month STRING DEFAULT '{{ target_month }}';
 DECLARE v_accounting_month STRING DEFAULT REPLACE(v_target_month, '-', '');
 
 CREATE OR REPLACE TABLE `{{ project_id }}.{{ source_dataset }}.access_input_author_conditions` AS
-WITH latest_rows AS (
-  SELECT *
-  FROM `{{ project_id }}.{{ raw_dataset }}.raw_ingest`
-  WHERE target_month = v_target_month
-    AND STARTS_WITH(source_file_name, '【著者条件一覧】')
-  QUALIFY ROW_NUMBER() OVER (
-    PARTITION BY source_file_id, source_sheet_name, row_number
-    ORDER BY loaded_at DESC
-  ) = 1
-)
 SELECT
-  IF(NULLIF(TRIM(col_001), '') IS NULL, NULL, CONCAT('01-', TRIM(col_001))) AS product_key,
-  NULLIF(TRIM(col_001), '') AS product_code,
-  NULLIF(TRIM(col_002), '') AS electronic_publication_code,
-  NULLIF(TRIM(col_003), '') AS author_identifier_id,
-  NULLIF(TRIM(col_004), '') AS title,
-  NULLIF(TRIM(col_005), '') AS planning_editor,
-  NULLIF(TRIM(col_006), '') AS author_number,
-  NULLIF(TRIM(col_007), '') AS author_category,
-  NULLIF(TRIM(col_008), '') AS payee_code,
-  NULLIF(TRIM(col_009), '') AS author_name,
-  NULLIF(TRIM(col_010), '') AS name_kana,
-  NULLIF(TRIM(col_011), '') AS payee_name,
-  NULLIF(TRIM(col_012), '') AS author_name_kana,
-  NULLIF(TRIM(col_013), '') AS payment_amount,
-  NULLIF(TRIM(col_014), '') AS initial_royalty_rate,
-  NULLIF(TRIM(col_015), '') AS revised_royalty_rate,
-  NULLIF(TRIM(col_016), '') AS revised_rate_sales_quantity,
-  NULLIF(TRIM(col_017), '') AS revised_rate_sales_amount,
-  NULLIF(TRIM(col_018), '') AS payment_hold_limit_amount,
-  NULLIF(TRIM(col_019), '') AS withholding_tax_type,
-  NULLIF(TRIM(col_020), '') AS royalty_information_note,
-  NULLIF(TRIM(col_021), '') AS product_type,
-  NULLIF(TRIM(col_022), '') AS sales_start_date
-FROM latest_rows
-WHERE row_number > 1
-  AND COALESCE(
-    NULLIF(TRIM(col_001), ''),
-    NULLIF(TRIM(col_002), ''),
-    NULLIF(TRIM(col_003), ''),
-    NULLIF(TRIM(col_004), '')
-  ) IS NOT NULL
+  IF(product_code IS NULL, NULL, CONCAT('01-', product_code)) AS product_key,
+  product_code,
+  electronic_publication_code,
+  author_identifier_id,
+  title,
+  planning_editor,
+  CAST(NULL AS STRING) AS author_number,
+  author_category,
+  payee_code,
+  author_name,
+  CAST(NULL AS STRING) AS name_kana,
+  payee_name,
+  CAST(NULL AS STRING) AS author_name_kana,
+  CAST(NULL AS STRING) AS payment_amount,
+  CAST(initial_royalty_rate AS STRING) AS initial_royalty_rate,
+  CAST(revised_royalty_rate AS STRING) AS revised_royalty_rate,
+  CAST(revised_rate_sales_quantity AS STRING) AS revised_rate_sales_quantity,
+  CAST(revised_rate_sales_amount AS STRING) AS revised_rate_sales_amount,
+  CAST(payment_hold_limit_amount AS STRING) AS payment_hold_limit_amount,
+  withholding_tax_type,
+  CAST(NULL AS STRING) AS royalty_information_note,
+  CAST(NULL AS STRING) AS product_type,
+  CAST(NULL AS STRING) AS sales_start_date
+FROM `{{ project_id }}.{{ source_dataset }}.source_author_conditions`
+WHERE target_month = v_target_month
+  AND COALESCE(product_code, electronic_publication_code, author_identifier_id, author_name) IS NOT NULL
 ORDER BY row_number;
 
 CREATE OR REPLACE TABLE `{{ project_id }}.{{ source_dataset }}.access_input_sales` AS
 WITH author_lookup AS (
   SELECT
-    CONCAT('01-', TRIM(col_001)) AS product_key,
-    NULLIF(TRIM(col_002), '') AS electronic_publication_code
-  FROM `{{ project_id }}.{{ raw_dataset }}.raw_ingest`
+    CONCAT('01-', product_code) AS product_key,
+    electronic_publication_code
+  FROM `{{ project_id }}.{{ source_dataset }}.source_author_conditions`
   WHERE target_month = v_target_month
-    AND STARTS_WITH(source_file_name, '【著者条件一覧】')
-    AND row_number > 1
-    AND NULLIF(TRIM(col_001), '') IS NOT NULL
-    AND NULLIF(TRIM(col_002), '') IS NOT NULL
+    AND product_code IS NOT NULL
+    AND electronic_publication_code IS NOT NULL
   QUALIFY ROW_NUMBER() OVER (
-    PARTITION BY CONCAT('01-', TRIM(col_001))
-    ORDER BY loaded_at DESC, row_number
+    PARTITION BY CONCAT('01-', product_code)
+    ORDER BY row_number
   ) = 1
 )
 SELECT
@@ -104,17 +87,15 @@ WHERE s.target_month = v_target_month
 CREATE OR REPLACE TABLE `{{ project_id }}.{{ source_dataset }}.access_input_store_detail` AS
 WITH author_lookup AS (
   SELECT
-    CONCAT('01-', TRIM(col_001)) AS product_key,
-    NULLIF(TRIM(col_002), '') AS electronic_publication_code
-  FROM `{{ project_id }}.{{ raw_dataset }}.raw_ingest`
+    CONCAT('01-', product_code) AS product_key,
+    electronic_publication_code
+  FROM `{{ project_id }}.{{ source_dataset }}.source_author_conditions`
   WHERE target_month = v_target_month
-    AND STARTS_WITH(source_file_name, '【著者条件一覧】')
-    AND row_number > 1
-    AND NULLIF(TRIM(col_001), '') IS NOT NULL
-    AND NULLIF(TRIM(col_002), '') IS NOT NULL
+    AND product_code IS NOT NULL
+    AND electronic_publication_code IS NOT NULL
   QUALIFY ROW_NUMBER() OVER (
-    PARTITION BY CONCAT('01-', TRIM(col_001))
-    ORDER BY loaded_at DESC, row_number
+    PARTITION BY CONCAT('01-', product_code)
+    ORDER BY row_number
   ) = 1
 ),
 base_rows AS (
@@ -165,7 +146,7 @@ legacy_manual_adjustments AS (
     CAST(NULL AS STRING) AS source_file_id,
     'legacy_manual_adjustment' AS source_file_name,
     CURRENT_TIMESTAMP() AS loaded_at
-  WHERE v_target_month = '2025-06'
+  WHERE v_accounting_month = '202506'
 )
 SELECT * FROM base_rows
 UNION ALL
