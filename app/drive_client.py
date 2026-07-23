@@ -24,6 +24,10 @@ SOURCE_KIND_LABELS = {
     SourceKind.EP_STATEMENT_DETAIL: "電子出版確報明細",
     SourceKind.MONTHLY_PRODUCT_SALES: "月別電子出版プロダクト別売上",
 }
+DRIVE_REQUIRED_SOURCE_KINDS = (
+    SourceKind.EP_STATEMENT_DETAIL,
+    SourceKind.MONTHLY_PRODUCT_SALES,
+)
 
 
 @dataclass
@@ -154,10 +158,10 @@ def select_source_files(files: Iterable[DriveFile], target_month: str | None) ->
     grouped = {kind: [] for kind in SourceKind}
     for file in files:
         grouped[file.source_kind].append(file)
-    missing = [SOURCE_KIND_LABELS[k] for k, values in grouped.items() if not values]
+    missing = [SOURCE_KIND_LABELS[k] for k in DRIVE_REQUIRED_SOURCE_KINDS if not grouped[k]]
     if missing:
-        raise FileNotFoundError(f"required source file not found: {', '.join(missing)}")
-    return [_select_one(kind, candidates, target_month) for kind, candidates in grouped.items()]
+        raise FileNotFoundError(f"required Drive source file not found: {', '.join(missing)}")
+    return [_select_one(kind, grouped[kind], target_month) for kind in DRIVE_REQUIRED_SOURCE_KINDS]
 
 
 def _select_one(source_kind: SourceKind, candidates: list[DriveFile], target_month: str | None) -> DriveFile:
