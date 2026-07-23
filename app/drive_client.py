@@ -16,6 +16,9 @@ class SourceKind(StrEnum):
     AUTHOR_CONDITIONS = "author_conditions"
     EP_STATEMENT_DETAIL = "ep_statement_detail"
     MONTHLY_PRODUCT_SALES = "monthly_product_sales"
+    POD_ACCESS_HISTORY = "pod_access_history"
+    AMAZON_POD_MONTHLY = "amazon_pod_monthly"
+    PF_SALES_REPORT = "pf_sales_report"
 
 
 SOURCE_KIND_LABELS = {
@@ -23,10 +26,18 @@ SOURCE_KIND_LABELS = {
     SourceKind.AUTHOR_CONDITIONS: "著者条件一覧",
     SourceKind.EP_STATEMENT_DETAIL: "電子出版確報明細",
     SourceKind.MONTHLY_PRODUCT_SALES: "月別電子出版プロダクト別売上",
+    SourceKind.POD_ACCESS_HISTORY: "POD販売報告Access履歴",
+    SourceKind.AMAZON_POD_MONTHLY: "Amazon POD月次販売実績",
+    SourceKind.PF_SALES_REPORT: "PF販売レポート",
 }
 DRIVE_REQUIRED_SOURCE_KINDS = (
     SourceKind.EP_STATEMENT_DETAIL,
     SourceKind.MONTHLY_PRODUCT_SALES,
+)
+POD_OPTIONAL_SOURCE_KINDS = (
+    SourceKind.POD_ACCESS_HISTORY,
+    SourceKind.AMAZON_POD_MONTHLY,
+    SourceKind.PF_SALES_REPORT,
 )
 
 
@@ -146,10 +157,18 @@ def classify_source_file(file_name: str) -> SourceKind | None:
         return SourceKind.EP_STATEMENT_DETAIL
     if re.fullmatch(r"月別電子出版プロダクト別売上一覧\(ICE印税用\)_.*反映版\.xlsx", file_name, flags=re.IGNORECASE):
         return SourceKind.MONTHLY_PRODUCT_SALES
+    if re.fullmatch(r"⑤POD販売報告データ\.xlsx", file_name, flags=re.IGNORECASE):
+        return SourceKind.POD_ACCESS_HISTORY
+    if re.fullmatch(r"【取込み用】.*AmazonPOD販売実績\(ICE\)\.xlsx", file_name, flags=re.IGNORECASE):
+        return SourceKind.AMAZON_POD_MONTHLY
+    if re.fullmatch(r"【PF】販売レポート_.*\.csv", file_name, flags=re.IGNORECASE):
+        return SourceKind.PF_SALES_REPORT
     return None
 
 
 def extract_target_month(file_name: str) -> str | None:
+    if classify_source_file(file_name) == SourceKind.PF_SALES_REPORT:
+        return None
     match = re.search(r"(20\d{2})(?:年)?(0[1-9]|1[0-2])", file_name)
     return "".join(match.groups()) if match else None
 
@@ -158,10 +177,32 @@ def select_source_files(files: Iterable[DriveFile], target_month: str | None) ->
     grouped = {kind: [] for kind in SourceKind}
     for file in files:
         grouped[file.source_kind].append(file)
+
     missing = [SOURCE_KIND_LABELS[k] for k in DRIVE_REQUIRED_SOURCE_KINDS if not grouped[k]]
     if missing:
         raise FileNotFoundError(f"required Drive source file not found: {', '.join(missing)}")
-    return [_select_one(kind, grouped[kind], target_month) for kind in DRIVE_REQUIRED_SOURCE_KINDS]
+
+    selected = [_select_one(kind, grouped[kind], target_month) for kind in DRIVE_REQUIRED_SOURCE_KINDS]
+    for kind in POD_OPTIONAL_SOURCE_KINDS:
+        optional = _select_optional(kind, grouped[kind], target_month)
+        if optional:
+            selected.append(optional)
+    return selected
+
+
+def _select_optional(source_kind: SourceKind, candidates: list[DriveFile], target_month: str | None) -> DriveFile | None:
+    if not candidates:
+        return None
+    if source_kind == SourceKind.POD_ACCESS_HISTORY:
+        return _latest_unique(source_kind, candidates) if target_month is None else None
+    if target_month:
+        matches = [file for file in candidates if file.target_month == target_month]
+        if matches:
+            return _latest_unique(source_kind, matches)
+        if source_kind == SourceKind.PF_SALES_REPORT:
+            return _latest_unique(source_kind, candidates)
+        return None
+    return _latest_unique(source_kind, candidates)
 
 
 def _select_one(source_kind: SourceKind, candidates: list[DriveFile], target_month: str | None) -> DriveFile:
