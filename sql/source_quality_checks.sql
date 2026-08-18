@@ -7,14 +7,14 @@ INSERT INTO `{{ project_id }}.{{ audit_dataset }}.source_quality_results`
   (run_id, checked_at, target_month, check_name, severity, table_name, error_count, sample_json)
 WITH checks AS (
   SELECT 'source_product_master_required_null' check_name, 'ERROR' severity, 'source_product_master' table_name,
-    COUNTIF(product_code IS NULL OR title IS NULL OR target_month IS NULL) error_count,
+    COUNTIF(product_code IS NULL OR title IS NULL) error_count,
     TO_JSON_STRING(ARRAY_AGG(STRUCT(product_code, title) LIMIT 5)) sample_json
-  FROM `{{ project_id }}.{{ source_dataset }}.source_product_master` WHERE target_month = v_target_month
+  FROM `{{ project_id }}.{{ source_dataset }}.source_product_master`
   UNION ALL
   SELECT 'source_author_conditions_required_null', 'ERROR', 'source_author_conditions',
-    COUNTIF(product_code IS NULL OR author_name IS NULL OR target_month IS NULL),
+    COUNTIF(product_code IS NULL OR author_name IS NULL),
     TO_JSON_STRING(ARRAY_AGG(STRUCT(product_code, author_name) LIMIT 5))
-  FROM `{{ project_id }}.{{ source_dataset }}.source_author_conditions` WHERE target_month = v_target_month
+  FROM `{{ project_id }}.{{ source_dataset }}.source_author_conditions`
   UNION ALL
   SELECT 'source_ep_statement_detail_required_null', 'ERROR', 'source_ep_statement_detail',
     COUNTIF(electronic_publication_code IS NULL OR store_name IS NULL OR target_month IS NULL),
@@ -30,14 +30,14 @@ WITH checks AS (
     TO_JSON_STRING(ARRAY_AGG(IF(pm.product_code IS NULL, STRUCT(s.product_code, s.product_name), NULL) IGNORE NULLS LIMIT 5))
   FROM `{{ project_id }}.{{ source_dataset }}.source_monthly_product_sales` s
   LEFT JOIN `{{ project_id }}.{{ source_dataset }}.source_product_master` pm
-    ON s.product_code = pm.product_code AND s.target_month = pm.target_month
+    ON s.product_code = pm.product_code
   WHERE s.target_month = v_target_month
   UNION ALL
   SELECT 'monthly_sales_author_conditions_unmatched', 'WARNING', 'source_monthly_product_sales', COUNTIF(ac.product_code IS NULL),
     TO_JSON_STRING(ARRAY_AGG(IF(ac.product_code IS NULL, STRUCT(s.product_code, s.electronic_publication_code), NULL) IGNORE NULLS LIMIT 5))
   FROM `{{ project_id }}.{{ source_dataset }}.source_monthly_product_sales` s
   LEFT JOIN `{{ project_id }}.{{ source_dataset }}.source_author_conditions` ac
-    ON s.product_code = ac.product_code AND s.target_month = ac.target_month
+    ON s.product_code = ac.product_code
   WHERE s.target_month = v_target_month
   UNION ALL
   SELECT 'electronic_publication_code_missing_after_completion', 'WARNING', 'source_monthly_product_sales', COUNTIF(electronic_publication_code IS NULL),
@@ -46,16 +46,16 @@ WITH checks AS (
   UNION ALL
   SELECT 'source_product_master_duplicate_key', 'ERROR', 'source_product_master', COUNT(*),
     TO_JSON_STRING(ARRAY_AGG(STRUCT(product_code, duplicate_count) LIMIT 5))
-  FROM (SELECT product_code, COUNT(*) duplicate_count FROM `{{ project_id }}.{{ source_dataset }}.source_product_master` WHERE target_month = v_target_month GROUP BY product_code HAVING COUNT(*) > 1)
+  FROM (SELECT product_code, COUNT(*) duplicate_count FROM `{{ project_id }}.{{ source_dataset }}.source_product_master` GROUP BY product_code HAVING COUNT(*) > 1)
   UNION ALL
   SELECT 'source_author_conditions_duplicate_key', 'ERROR', 'source_author_conditions', COUNT(*),
     TO_JSON_STRING(ARRAY_AGG(STRUCT(product_code, author_identifier_id, duplicate_count) LIMIT 5))
-  FROM (SELECT product_code, author_identifier_id, COUNT(*) duplicate_count FROM `{{ project_id }}.{{ source_dataset }}.source_author_conditions` WHERE target_month = v_target_month GROUP BY product_code, author_identifier_id HAVING COUNT(*) > 1)
+  FROM (SELECT product_code, author_identifier_id, COUNT(*) duplicate_count FROM `{{ project_id }}.{{ source_dataset }}.source_author_conditions` GROUP BY product_code, author_identifier_id HAVING COUNT(*) > 1)
   UNION ALL
   SELECT CONCAT(table_name, '_row_count_zero'), 'ERROR', table_name, IF(row_count = 0, 1, 0), NULL
   FROM (
-    SELECT 'source_product_master' table_name, COUNT(*) row_count FROM `{{ project_id }}.{{ source_dataset }}.source_product_master` WHERE target_month = v_target_month
-    UNION ALL SELECT 'source_author_conditions', COUNT(*) FROM `{{ project_id }}.{{ source_dataset }}.source_author_conditions` WHERE target_month = v_target_month
+    SELECT 'source_product_master' table_name, COUNT(*) row_count FROM `{{ project_id }}.{{ source_dataset }}.source_product_master`
+    UNION ALL SELECT 'source_author_conditions', COUNT(*) FROM `{{ project_id }}.{{ source_dataset }}.source_author_conditions`
     UNION ALL SELECT 'source_ep_statement_detail', COUNT(*) FROM `{{ project_id }}.{{ source_dataset }}.source_ep_statement_detail` WHERE target_month = v_target_month
     UNION ALL SELECT 'source_monthly_product_sales', COUNT(*) FROM `{{ project_id }}.{{ source_dataset }}.source_monthly_product_sales` WHERE target_month = v_target_month
   )
