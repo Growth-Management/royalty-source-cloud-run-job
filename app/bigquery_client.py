@@ -33,16 +33,21 @@ class BigQueryClient:
         return [dict(row.items()) for row in rows]
 
     def query_dataframe(self, sql: str) -> pd.DataFrame:
-        """Run a query and return its complete result as a DataFrame.
+        """Run a query and return its complete result as an Excel-safe DataFrame.
 
-        Build the DataFrame from BigQuery Row objects instead of Result.to_dataframe().
-        This keeps workbook export independent from optional db-dtypes/BQ Storage
-        conversion behavior and preserves the BigQuery schema column order.
+        Build from BigQuery Row objects instead of Result.to_dataframe() so export
+        does not depend on optional db-dtypes/BQ Storage conversion behavior.
+        BigQuery TIMESTAMP values are normalized to UTC-naive datetimes because
+        Excel/openpyxl cannot write timezone-aware datetime values.
         """
         row_iterator = self.client.query(sql).result()
         columns = [field.name for field in row_iterator.schema]
         records = [dict(row.items()) for row in row_iterator]
-        return pd.DataFrame.from_records(records, columns=columns)
+        dataframe = pd.DataFrame.from_records(records, columns=columns)
+        for column in dataframe.columns:
+            if isinstance(dataframe[column].dtype, pd.DatetimeTZDtype):
+                dataframe[column] = dataframe[column].dt.tz_convert("UTC").dt.tz_localize(None)
+        return dataframe
 
     def read_table_dataframe(self, table_id: str) -> pd.DataFrame:
         """Read a fully-qualified BigQuery table for file export."""
@@ -52,7 +57,19 @@ class BigQueryClient:
         sql = Path(sql_path).read_text(encoding="utf-8")
         for key, value in replacements.items():
             sql = sql.replace("{{ " + key + " }}", value)
-        unresolved = [token for token in ("{{ project_id }}", "{{ staging_dataset }}", "{{ raw_dataset }}", "{{ source_dataset }}", "{{ audit_dataset }}", "{{ target_month }}", "{{ run_id }}") if token in sql]
+        unresolved = [
+            token
+            for token in (
+                "{{ project_id }}",
+                "{{ staging_dataset }}",
+                "{{ raw_dataset }}",
+                "{{ source_dataset }}",
+                "{{ audit_dataset }}",
+                "{{ target_month }}",
+                "{{ run_id }}",
+            )
+            if token in sql
+        ]
         if unresolved:
             raise ValueError(f"unresolved SQL template variables in {sql_path}: {', '.join(unresolved)}")
         return self.run_sql(sql)
