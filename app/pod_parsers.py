@@ -132,6 +132,13 @@ class PodParser:
         result: list[ParsedSheet] = []
         amazon_sales_month = _previous_month(target_month)
         for sheet_name in excel.sheet_names:
+            # The legacy workbook contains both the original monthly sheet and
+            # a transfer/copy sheet. Loading both doubles the same business rows.
+            if source_kind == SourceKind.AMAZON_POD_MONTHLY and "転記用" in sheet_name:
+                continue
+            if "請求書" in sheet_name:
+                continue
+
             raw = excel.parse(sheet_name, dtype=str, header=None).fillna("")
             header_index = self._find_access_header(raw)
             if header_index is None:
