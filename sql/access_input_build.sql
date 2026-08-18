@@ -138,6 +138,7 @@ legacy_manual_adjustments AS (
     CAST(NULL AS STRING) AS source_file_id,
     'legacy_manual_adjustment' AS source_file_name,
     CURRENT_TIMESTAMP() AS loaded_at
+  FROM UNNEST([1]) AS _
   WHERE v_accounting_month = '202506'
 )
 SELECT * FROM base_rows
