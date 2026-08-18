@@ -10,5 +10,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app ./app
 COPY sql ./sql
+COPY scripts ./scripts
+
+RUN python -m compileall -q app scripts
 
 CMD ["python", "-m", "app.main"]
