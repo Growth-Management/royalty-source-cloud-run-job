@@ -335,6 +335,25 @@ jobs:
           echo "exit_code=${STATUS}" >> "${GITHUB_OUTPUT}"
           exit "${STATUS}"
 
+      - name: Persist validation reports to BigQuery audit
+        id: persist_validation
+        if: always() && steps.download.outcome == 'success'
+        shell: bash
+        run: |
+          set -euo pipefail
+          TARGET_MONTH="${{ steps.target.outputs.target_month }}"
+          ARTIFACT_DIR="artifacts/${TARGET_MONTH}"
+
+          python scripts/persist_validation_results.py \
+            --project-id "${GCP_PROJECT_ID}" \
+            --dataset "${BQ_AUDIT_DATASET}" \
+            --target-month "${TARGET_MONTH}" \
+            --run-id "${GITHUB_RUN_ID}" \
+            --location "${BQ_LOCATION}" \
+            --validation-json "${ARTIFACT_DIR}/validation.json" \
+            --constraints-json "${ARTIFACT_DIR}/constraints_validation.json" \
+            --audit-summary-json "${ARTIFACT_DIR}/audit_summary.json"
+
       - name: Upload generated workbook artifacts
         if: always() && steps.download.outcome == 'success'
         uses: actions/upload-artifact@v4
@@ -379,6 +398,7 @@ jobs:
             echo "| Workbook/BigQuery validation | \`${{ steps.workbook_validation.outcome }}\` |"
             echo "| Required/duplicate validation | \`${{ steps.constraint_validation.outcome }}\` |"
             echo "| Pipeline audit summary | \`${{ steps.audit_summary.outcome }}\` |"
+            echo "| Persist validation audit | \`${{ steps.persist_validation.outcome }}\` |"
             echo "| Artifact | \`generated-workbooks-${{ steps.target.outputs.target_month }}\` |"
             echo "| Restored default | \`EXPORT_OUTPUT_FILES=false\` |"
             if [ -n "${NORMAL_EXECUTION}" ]; then
