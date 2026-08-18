@@ -12,6 +12,7 @@ import pandas as pd
 from app.bigquery_client import BigQueryClient
 from app.drive_client import DriveClient, DriveFile, SourceKind
 from app.parsers import ParsedSheet, WorkbookParser
+from app.pod_parsers import PodParser
 from app.settings import Settings
 
 
@@ -20,14 +21,31 @@ RAW_TABLE_BY_KIND = {
     SourceKind.AUTHOR_CONDITIONS: "raw_author_conditions",
     SourceKind.EP_STATEMENT_DETAIL: "raw_ep_statement_detail",
     SourceKind.MONTHLY_PRODUCT_SALES: "raw_monthly_product_sales",
+    SourceKind.POD_ACCESS_HISTORY: "raw_pod_access_history",
+    SourceKind.AMAZON_POD_MONTHLY: "raw_amazon_pod_monthly",
+    SourceKind.PF_SALES_REPORT: "raw_pf_sales_report",
 }
 STAGING_TABLE_BY_KIND = {
     SourceKind.PRODUCT_MASTER: "staging_product_master",
     SourceKind.AUTHOR_CONDITIONS: "staging_author_conditions",
     SourceKind.EP_STATEMENT_DETAIL: "staging_ep_statement_detail",
     SourceKind.MONTHLY_PRODUCT_SALES: "staging_monthly_product_sales",
+    SourceKind.POD_ACCESS_HISTORY: "staging_pod_access_history",
+    SourceKind.AMAZON_POD_MONTHLY: "staging_amazon_pod_monthly",
+    SourceKind.PF_SALES_REPORT: "staging_pf_sales_report",
 }
-SOURCE_TABLES = ("source_product_master", "source_author_conditions", "source_ep_statement_detail", "source_monthly_product_sales")
+POD_SOURCE_KINDS = {
+    SourceKind.POD_ACCESS_HISTORY,
+    SourceKind.AMAZON_POD_MONTHLY,
+    SourceKind.PF_SALES_REPORT,
+}
+SOURCE_TABLES = (
+    "source_product_master",
+    "source_author_conditions",
+    "source_ep_statement_detail",
+    "source_monthly_product_sales",
+    "source_pod_sales_report",
+)
 ACCESS_WORKBOOK_SHEETS = {
     "sales": "access_input_sales",
     "store_detail": "access_input_store_detail",
@@ -61,6 +79,7 @@ class SourcePipeline:
         self.drive = DriveClient(settings.drive_source_folder_id)
         self.output_drive = DriveClient(settings.drive_output_folder_id)
         self.parser = WorkbookParser(settings.max_generic_columns)
+        self.pod_parser = PodParser(settings.max_generic_columns)
         self.bq = BigQueryClient(settings.gcp_project_id, settings.bq_location)
         self.base_dir = Path(__file__).resolve().parents[1]
         self.logger = logging.getLogger(__name__)
@@ -95,15 +114,34 @@ class SourcePipeline:
             self._write_audit(stats)
 
     def _prepare_bigquery(self) -> None:
-        for dataset in (self.settings.bq_staging_dataset, self.settings.bq_raw_dataset, self.settings.bq_source_dataset, self.settings.bq_audit_dataset):
+        for dataset in (
+            self.settings.bq_staging_dataset,
+            self.settings.bq_raw_dataset,
+            self.settings.bq_source_dataset,
+            self.settings.bq_audit_dataset,
+        ):
             self.bq.ensure_dataset(dataset)
         self.bq.ensure_audit_tables(self.settings.bq_audit_dataset)
-        self.bq.run_sql_file(self.base_dir / "sql" / "staging_tables.sql", self._sql_replacements(self.settings.job_target_month or ""))
-        self.bq.run_sql_file(self.base_dir / "sql" / "raw_tables.sql", self._sql_replacements(self.settings.job_target_month or ""))
+        replacements = self._sql_replacements(self.settings.job_target_month or "")
+        self.bq.run_sql_file(self.base_dir / "sql" / "staging_tables.sql", replacements)
+        self.bq.run_sql_file(self.base_dir / "sql" / "raw_tables.sql", replacements)
+        self.bq.run_sql_file(self.base_dir / "sql" / "pod_tables.sql", replacements)
 
     def _process_file(self, stats: AuditStats, drive_file: DriveFile) -> None:
         payload = self.drive.download_file(drive_file)
-        for sheet in self.parser.parse(drive_file.name, payload, drive_file.source_kind):
+        if drive_file.source_kind in POD_SOURCE_KINDS:
+            target_month = stats.target_month or drive_file.target_month
+            if not target_month:
+                raise ValueError(f"target_month could not be resolved: {drive_file.name}")
+            sheets = self.pod_parser.parse(
+                drive_file.name,
+                payload,
+                drive_file.source_kind,
+                target_month,
+            )
+        else:
+            sheets = self.parser.parse(drive_file.name, payload, drive_file.source_kind)
+        for sheet in sheets:
             self._process_sheet(stats, drive_file, sheet)
 
     def _process_sheet(self, stats: AuditStats, drive_file: DriveFile, sheet: ParsedSheet) -> None:
@@ -117,19 +155,40 @@ class SourcePipeline:
 
         staging_rows = self.bq.load_dataframe(generic, self._table(self.settings.bq_staging_dataset, "staging_ingest"))
         raw_rows = self.bq.load_dataframe(generic.copy(), self._table(self.settings.bq_raw_dataset, "raw_ingest"))
-        staging_rows += self.bq.load_dataframe(mapped_staging, self._table(self.settings.bq_staging_dataset, STAGING_TABLE_BY_KIND[drive_file.source_kind]))
-        raw_rows += self.bq.load_dataframe(mapped_raw, self._table(self.settings.bq_raw_dataset, RAW_TABLE_BY_KIND[drive_file.source_kind]))
+        staging_rows += self.bq.load_dataframe(
+            mapped_staging,
+            self._table(self.settings.bq_staging_dataset, STAGING_TABLE_BY_KIND[drive_file.source_kind]),
+        )
+        raw_rows += self.bq.load_dataframe(
+            mapped_raw,
+            self._table(self.settings.bq_raw_dataset, RAW_TABLE_BY_KIND[drive_file.source_kind]),
+        )
 
         stats.staging_rows_loaded += staging_rows
         stats.raw_rows_loaded += raw_rows
         stats.warning_count += len(sheet.warnings)
-        stats.audit_rows.append(self._audit_row(stats, drive_file, sheet.sheet_name, staging_rows, raw_rows, len(sheet.warnings), "LOADED"))
+        stats.audit_rows.append(
+            self._audit_row(
+                stats,
+                drive_file,
+                sheet.sheet_name,
+                staging_rows,
+                raw_rows,
+                len(sheet.warnings),
+                "LOADED",
+            )
+        )
 
     def _build_source(self, stats: AuditStats) -> None:
         if not stats.target_month:
             raise ValueError("target_month is required before SOURCE build")
-        self.bq.run_sql_file(self.base_dir / "sql" / "source_build.sql", self._sql_replacements(stats.target_month))
-        stats.source_rows_created = sum(self.bq.count_rows(self._table(self.settings.bq_source_dataset, table), stats.target_month) for table in SOURCE_TABLES)
+        replacements = self._sql_replacements(stats.target_month)
+        self.bq.run_sql_file(self.base_dir / "sql" / "source_build.sql", replacements)
+        self.bq.run_sql_file(self.base_dir / "sql" / "pod_source_build.sql", replacements)
+        stats.source_rows_created = sum(
+            self.bq.count_rows(self._table(self.settings.bq_source_dataset, table), stats.target_month)
+            for table in SOURCE_TABLES
+        )
 
     def _build_access_equivalent_tables(self, stats: AuditStats) -> None:
         if not stats.target_month:
@@ -178,16 +237,40 @@ class SourcePipeline:
         return buffer.getvalue()
 
     def _write_audit(self, stats: AuditStats) -> None:
-        rows = stats.audit_rows + [self._audit_row(stats, None, None, stats.staging_rows_loaded, stats.raw_rows_loaded, stats.warning_count, stats.status)]
+        rows = stats.audit_rows + [
+            self._audit_row(
+                stats,
+                None,
+                None,
+                stats.staging_rows_loaded,
+                stats.raw_rows_loaded,
+                stats.warning_count,
+                stats.status,
+            )
+        ]
         try:
             self.bq.insert_json_rows(self._table(self.settings.bq_audit_dataset, "pipeline_audit_log"), rows)
         except Exception:
             self.logger.exception("failed to write audit log", extra={"run_id": stats.run_id})
 
-    def _add_metadata(self, dataframe: pd.DataFrame, drive_file: DriveFile, sheet_name: str, target_month: str, loaded_at: datetime, raw_prefix: bool) -> pd.DataFrame:
+    def _add_metadata(
+        self,
+        dataframe: pd.DataFrame,
+        drive_file: DriveFile,
+        sheet_name: str,
+        target_month: str,
+        loaded_at: datetime,
+        raw_prefix: bool,
+    ) -> pd.DataFrame:
         working = dataframe.copy()
         if raw_prefix:
-            working = working.rename(columns={c: f"raw_{c}" for c in working.columns if c != "row_number" and not c.startswith("raw_")})
+            working = working.rename(
+                columns={
+                    column: f"raw_{column}"
+                    for column in working.columns
+                    if column != "row_number" and not column.startswith("raw_")
+                }
+            )
         working.insert(1, "target_month", target_month)
         working.insert(2, "loaded_at", loaded_at)
         working.insert(3, "source_file_id", drive_file.file_id)
@@ -203,7 +286,16 @@ class SourcePipeline:
             raise ValueError("target_month could not be extracted from selected source files")
         return months[-1]
 
-    def _audit_row(self, stats: AuditStats, drive_file: DriveFile | None, sheet_name: str | None, staging_rows: int, raw_rows: int, warning_count: int, status: str) -> dict:
+    def _audit_row(
+        self,
+        stats: AuditStats,
+        drive_file: DriveFile | None,
+        sheet_name: str | None,
+        staging_rows: int,
+        raw_rows: int,
+        warning_count: int,
+        status: str,
+    ) -> dict:
         return {
             "run_id": stats.run_id,
             "started_at": stats.started_at.isoformat(),
