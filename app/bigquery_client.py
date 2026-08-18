@@ -33,8 +33,16 @@ class BigQueryClient:
         return [dict(row.items()) for row in rows]
 
     def query_dataframe(self, sql: str) -> pd.DataFrame:
-        """Run a query and return its complete result as a DataFrame."""
-        return self.client.query(sql).result().to_dataframe(create_bqstorage_client=False)
+        """Run a query and return its complete result as a DataFrame.
+
+        Build the DataFrame from BigQuery Row objects instead of Result.to_dataframe().
+        This keeps workbook export independent from optional db-dtypes/BQ Storage
+        conversion behavior and preserves the BigQuery schema column order.
+        """
+        row_iterator = self.client.query(sql).result()
+        columns = [field.name for field in row_iterator.schema]
+        records = [dict(row.items()) for row in row_iterator]
+        return pd.DataFrame.from_records(records, columns=columns)
 
     def read_table_dataframe(self, table_id: str) -> pd.DataFrame:
         """Read a fully-qualified BigQuery table for file export."""
@@ -44,14 +52,21 @@ class BigQueryClient:
         sql = Path(sql_path).read_text(encoding="utf-8")
         for key, value in replacements.items():
             sql = sql.replace("{{ " + key + " }}", value)
+        unresolved = [token for token in ("{{ project_id }}", "{{ staging_dataset }}", "{{ raw_dataset }}", "{{ source_dataset }}", "{{ audit_dataset }}", "{{ target_month }}", "{{ run_id }}") if token in sql]
+        if unresolved:
+            raise ValueError(f"unresolved SQL template variables in {sql_path}: {', '.join(unresolved)}")
         return self.run_sql(sql)
 
-    def count_rows(self, table_id: str, target_month: str) -> int:
-        query = f"SELECT COUNT(*) AS row_count FROM `{table_id}` WHERE target_month = @target_month"
-        job_config = self.bigquery.QueryJobConfig(
-            query_parameters=[self.bigquery.ScalarQueryParameter("target_month", "STRING", target_month)]
-        )
-        rows = list(self.client.query(query, job_config=job_config).result())
+    def count_rows(self, table_id: str, target_month: str | None = None) -> int:
+        if target_month is None:
+            query = f"SELECT COUNT(*) AS row_count FROM `{table_id}`"
+            rows = list(self.client.query(query).result())
+        else:
+            query = f"SELECT COUNT(*) AS row_count FROM `{table_id}` WHERE target_month = @target_month"
+            job_config = self.bigquery.QueryJobConfig(
+                query_parameters=[self.bigquery.ScalarQueryParameter("target_month", "STRING", target_month)]
+            )
+            rows = list(self.client.query(query, job_config=job_config).result())
         return int(rows[0]["row_count"]) if rows else 0
 
     def insert_json_rows(self, table_id: str, rows: list[dict[str, Any]]) -> None:
