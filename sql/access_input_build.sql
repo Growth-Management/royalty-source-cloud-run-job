@@ -27,8 +27,7 @@ SELECT
   CAST(NULL AS STRING) AS product_type,
   CAST(NULL AS STRING) AS sales_start_date
 FROM `{{ project_id }}.{{ source_dataset }}.source_author_conditions`
-WHERE target_month = v_target_month
-  AND COALESCE(product_code, electronic_publication_code, author_identifier_id, author_name) IS NOT NULL
+WHERE COALESCE(product_code, electronic_publication_code, author_identifier_id, author_name) IS NOT NULL
 ORDER BY row_number;
 
 CREATE OR REPLACE TABLE `{{ project_id }}.{{ source_dataset }}.access_input_sales` AS
@@ -37,8 +36,7 @@ WITH author_lookup AS (
     CONCAT('01-', product_code) AS product_key,
     electronic_publication_code
   FROM `{{ project_id }}.{{ source_dataset }}.source_author_conditions`
-  WHERE target_month = v_target_month
-    AND product_code IS NOT NULL
+  WHERE product_code IS NOT NULL
     AND electronic_publication_code IS NOT NULL
   QUALIFY ROW_NUMBER() OVER (
     PARTITION BY CONCAT('01-', product_code)
@@ -75,9 +73,7 @@ SELECT
 FROM `{{ project_id }}.{{ source_dataset }}.source_monthly_product_sales` s
 LEFT JOIN author_lookup a USING (product_key)
 WHERE s.target_month = v_target_month
-  -- POD sales are exported to the separate Amazon POD workbook.
   AND COALESCE(TRIM(s.product_type_name), '') != 'POD'
-  -- The legacy workbook manually removes Amazon partner 941 return adjustments.
   AND NOT (
     TRIM(COALESCE(s.partner_company_code, '')) = '941'
     AND COALESCE(s.sales_quantity, 0) = 0
@@ -90,8 +86,7 @@ WITH author_lookup AS (
     CONCAT('01-', product_code) AS product_key,
     electronic_publication_code
   FROM `{{ project_id }}.{{ source_dataset }}.source_author_conditions`
-  WHERE target_month = v_target_month
-    AND product_code IS NOT NULL
+  WHERE product_code IS NOT NULL
     AND electronic_publication_code IS NOT NULL
   QUALIFY ROW_NUMBER() OVER (
     PARTITION BY CONCAT('01-', product_code)
@@ -125,11 +120,8 @@ base_rows AS (
   LEFT JOIN author_lookup a
     ON d.value_code = a.product_key
   WHERE d.target_month = v_target_month
-    -- Amazon POD is exported to the separate POD workbook.
     AND TRIM(COALESCE(d.billing_code, '')) != '6191'
 ),
--- This row exists only in the legacy 2025-06 workbook and is not present in
--- the monthly source sheet. Keep it isolated as an auditable one-off correction.
 legacy_manual_adjustments AS (
   SELECT
     '202506' AS accounting_month_1,
