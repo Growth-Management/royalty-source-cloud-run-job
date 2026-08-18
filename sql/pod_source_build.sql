@@ -2,7 +2,42 @@ DECLARE v_target_month STRING DEFAULT '{{ target_month }}';
 DECLARE v_dl_month STRING DEFAULT FORMAT_DATE('%Y%m', DATE_SUB(PARSE_DATE('%Y%m', v_target_month), INTERVAL 1 MONTH));
 
 CREATE OR REPLACE TABLE `{{ project_id }}.{{ source_dataset }}.source_pod_sales_report` AS
-WITH amazon_latest_file AS (
+WITH seed AS (
+    SELECT
+        target_month
+        , publisher
+        , product_code
+        , isbn
+        , title
+        , unit_price
+        , rate
+        , quantity
+        , net_amount
+        , tax
+        , sales_amount
+        , manufacturing_cost
+        , factor_15
+        , factor_108
+        , pages
+        , dl_month
+        , sales_month
+        , source_kind
+        , source_row_number
+        , source_file_id
+        , source_file_name
+        , loaded_at
+    FROM
+        `{{ project_id }}.{{ source_dataset }}.pod_access_history_seed`
+    WHERE
+        target_month = v_target_month
+)
+, seed_state AS (
+    SELECT
+        COUNT(*) > 0 AS has_seed
+    FROM
+        seed
+)
+, amazon_latest_file AS (
     SELECT
         source_file_id
     FROM
@@ -128,11 +163,23 @@ WITH amazon_latest_file AS (
 SELECT
     *
 FROM
-    amazon
-WHERE
-    COALESCE(quantity, 0) != 0
+    seed
 UNION ALL
 SELECT
-    *
+    a.*
 FROM
-    pf;
+    amazon a
+CROSS JOIN
+    seed_state s
+WHERE
+    NOT s.has_seed
+    AND COALESCE(a.quantity, 0) != 0
+UNION ALL
+SELECT
+    p.*
+FROM
+    pf p
+CROSS JOIN
+    seed_state s
+WHERE
+    NOT s.has_seed;
