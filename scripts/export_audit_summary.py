@@ -109,7 +109,8 @@ def build_markdown(report: dict[str, Any]) -> str:
         ]
     )
     if audit.get("error_message"):
-        lines.append(f"| Error message | {str(audit['error_message']).replace('|', '\\|')} |")
+        error_message = str(audit["error_message"]).replace("|", "\\|")
+        lines.append(f"| Error message | {error_message} |")
 
     quality = report.get("quality_results", [])
     lines.extend(
