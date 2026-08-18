@@ -16,31 +16,19 @@ WITH checks AS (
   UNION ALL
 
   SELECT
-    'access_input_sales_row_count_zero',
-    'ERROR',
-    'access_input_sales',
-    IF(COUNT(*) = 0, 1, 0),
-    NULL
+    'access_input_sales_row_count_zero', 'ERROR', 'access_input_sales', IF(COUNT(*) = 0, 1, 0), NULL
   FROM `{{ project_id }}.{{ source_dataset }}.access_input_sales`
 
   UNION ALL
 
   SELECT
-    'access_input_store_detail_row_count_zero',
-    'ERROR',
-    'access_input_store_detail',
-    IF(COUNT(*) = 0, 1, 0),
-    NULL
+    'access_input_store_detail_row_count_zero', 'ERROR', 'access_input_store_detail', IF(COUNT(*) = 0, 1, 0), NULL
   FROM `{{ project_id }}.{{ source_dataset }}.access_input_store_detail`
 
   UNION ALL
 
   SELECT
-    'access_input_pod_sales_row_count_zero',
-    'ERROR',
-    'access_input_pod_sales',
-    IF(COUNT(*) = 0, 1, 0),
-    NULL
+    'access_input_pod_sales_row_count_zero', 'ERROR', 'access_input_pod_sales', IF(COUNT(*) = 0, 1, 0), NULL
   FROM `{{ project_id }}.{{ source_dataset }}.access_input_pod_sales`
 
   UNION ALL
@@ -90,17 +78,94 @@ WITH checks AS (
   UNION ALL
 
   SELECT
-    'access_input_pod_sales_non_pod_mixed',
+    'access_input_pod_sales_unknown_source_kind',
     'ERROR',
     'access_input_pod_sales',
-    COUNTIF(
-      TRIM(COALESCE(product_type_name, '')) != 'POD'
-      AND TRIM(COALESCE(billing_code, '')) != '6191'
-    ),
-    TO_JSON_STRING(ARRAY_AGG(IF(
-      TRIM(COALESCE(product_type_name, '')) != 'POD'
-      AND TRIM(COALESCE(billing_code, '')) != '6191',
-      STRUCT(product_type_name, billing_code, product_code), NULL) IGNORE NULLS LIMIT 5))
+    COUNTIF(source_kind NOT IN ('amazon_pod_monthly', 'pf_sales_report', 'pod_access_history')),
+    TO_JSON_STRING(ARRAY_AGG(IF(source_kind NOT IN ('amazon_pod_monthly', 'pf_sales_report', 'pod_access_history'),
+      STRUCT(source_kind, product_code, isbn), NULL) IGNORE NULLS LIMIT 5))
+  FROM `{{ project_id }}.{{ source_dataset }}.access_input_pod_sales`
+
+  UNION ALL
+
+  SELECT
+    'access_input_pod_sales_zero_quantity_remaining',
+    'ERROR',
+    'access_input_pod_sales',
+    COUNTIF(COALESCE(quantity, 0) = 0),
+    TO_JSON_STRING(ARRAY_AGG(IF(COALESCE(quantity, 0) = 0,
+      STRUCT(source_kind, product_code, isbn, quantity), NULL) IGNORE NULLS LIMIT 5))
+  FROM `{{ project_id }}.{{ source_dataset }}.access_input_pod_sales`
+
+  UNION ALL
+
+  SELECT
+    'access_input_pod_sales_target_month_mismatch',
+    'ERROR',
+    'access_input_pod_sales',
+    COUNTIF(sales_month != v_accounting_month),
+    TO_JSON_STRING(ARRAY_AGG(IF(sales_month != v_accounting_month,
+      STRUCT(source_kind, product_code, isbn, sales_month), NULL) IGNORE NULLS LIMIT 5))
+  FROM `{{ project_id }}.{{ source_dataset }}.access_input_pod_sales`
+
+  UNION ALL
+
+  SELECT
+    'access_input_pod_sales_202602_row_count',
+    'ERROR',
+    'access_input_pod_sales',
+    IF(v_accounting_month = '202602', ABS(COUNT(*) - 19), 0),
+    NULL
+  FROM `{{ project_id }}.{{ source_dataset }}.access_input_pod_sales`
+
+  UNION ALL
+
+  SELECT
+    'access_input_pod_sales_202602_quantity_total',
+    'ERROR',
+    'access_input_pod_sales',
+    IF(v_accounting_month = '202602', ABS(COALESCE(SUM(quantity), 0) - 38), 0),
+    NULL
+  FROM `{{ project_id }}.{{ source_dataset }}.access_input_pod_sales`
+
+  UNION ALL
+
+  SELECT
+    'access_input_pod_sales_202602_sales_amount_total',
+    'ERROR',
+    'access_input_pod_sales',
+    IF(v_accounting_month = '202602', CAST(ABS(COALESCE(SUM(sales_amount), 0) - 51138) AS INT64), 0),
+    NULL
+  FROM `{{ project_id }}.{{ source_dataset }}.access_input_pod_sales`
+
+  UNION ALL
+
+  SELECT
+    'access_input_pod_sales_202602_manufacturing_cost_total',
+    'ERROR',
+    'access_input_pod_sales',
+    IF(v_accounting_month = '202602', CAST(ABS(COALESCE(SUM(manufacturing_cost), 0) - 37027) AS INT64), 0),
+    NULL
+  FROM `{{ project_id }}.{{ source_dataset }}.access_input_pod_sales`
+
+  UNION ALL
+
+  SELECT
+    'access_input_pod_sales_202602_amazon_row_count',
+    'ERROR',
+    'access_input_pod_sales',
+    IF(v_accounting_month = '202602', ABS(COUNTIF(source_kind = 'amazon_pod_monthly') - 4), 0),
+    NULL
+  FROM `{{ project_id }}.{{ source_dataset }}.access_input_pod_sales`
+
+  UNION ALL
+
+  SELECT
+    'access_input_pod_sales_202602_pf_row_count',
+    'ERROR',
+    'access_input_pod_sales',
+    IF(v_accounting_month = '202602', ABS(COUNTIF(source_kind = 'pf_sales_report') - 15), 0),
+    NULL
   FROM `{{ project_id }}.{{ source_dataset }}.access_input_pod_sales`
 
   UNION ALL
