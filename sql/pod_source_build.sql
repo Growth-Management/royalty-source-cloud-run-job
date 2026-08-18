@@ -3,6 +3,7 @@ DECLARE v_target_month STRING DEFAULT '{{ target_month }}';
 CREATE OR REPLACE TABLE `{{ project_id }}.{{ source_dataset }}.source_pod_sales_report` AS
 WITH amazon AS (
   SELECT
+    v_target_month AS target_month,
     COALESCE(NULLIF(TRIM(publisher), ''), 'ICE') AS publisher,
     TRIM(product_code) AS product_code,
     CASE
@@ -32,6 +33,7 @@ WITH amazon AS (
 ),
 pf AS (
   SELECT
+    v_target_month AS target_month,
     'ICE' AS publisher,
     '' AS product_code,
     CASE
