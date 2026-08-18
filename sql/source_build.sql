@@ -1,60 +1,8 @@
 DECLARE v_target_month STRING DEFAULT '{{ target_month }}';
 
-CREATE OR REPLACE TABLE `{{ project_id }}.{{ source_dataset }}.source_product_master` AS
-SELECT
-  v_target_month AS target_month,
-  ROW_NUMBER() OVER (ORDER BY product_code) AS row_number,
-  NULLIF(TRIM(product_code), '') AS product_code,
-  NULLIF(TRIM(base_isbn_13), '') AS base_isbn,
-  NULLIF(TRIM(e_publishing_code), '') AS electronic_publication_code,
-  NULLIF(TRIM(planning_edit), '') AS planning_editor,
-  sales_start_date,
-  NULLIF(TRIM(title), '') AS title,
-  NULLIF(TRIM(subtitle_suffix), '') AS subtitle,
-  price_excluding_tax AS price,
-  NULLIF(TRIM(isbn_13), '') AS isbn,
-  NULLIF(TRIM(author), '') AS author,
-  CAST(NULL AS STRING) AS source_file_id,
-  'ice_qb_aggregation.sf_biblio_product_master' AS source_file_name,
-  CAST(NULL AS STRING) AS source_sheet_name,
-  CURRENT_TIMESTAMP() AS loaded_at
-FROM `{{ project_id }}.ice_qb_aggregation.sf_biblio_product_master`
-WHERE COALESCE(
-  NULLIF(TRIM(product_code), ''),
-  NULLIF(TRIM(title), ''),
-  NULLIF(TRIM(e_publishing_code), '')
-) IS NOT NULL;
-
-CREATE OR REPLACE TABLE `{{ project_id }}.{{ source_dataset }}.source_author_conditions` AS
-SELECT
-  v_target_month AS target_month,
-  ROW_NUMBER() OVER (ORDER BY product_code, contributor_id, contributor_role_code) AS row_number,
-  NULLIF(TRIM(product_code), '') AS product_code,
-  NULLIF(TRIM(e_publishing_code), '') AS electronic_publication_code,
-  NULLIF(TRIM(contributor_id), '') AS author_identifier_id,
-  NULLIF(TRIM(title), '') AS title,
-  NULLIF(TRIM(planning_edit), '') AS planning_editor,
-  NULLIF(TRIM(contributor_role), '') AS author_category,
-  NULLIF(TRIM(payee_code), '') AS payee_code,
-  NULLIF(TRIM(contributor_name), '') AS author_name,
-  NULLIF(TRIM(payee_name), '') AS payee_name,
-  royalty_rate_initial AS initial_royalty_rate,
-  royalty_rate_after_change AS revised_royalty_rate,
-  SAFE_CAST(royalty_change_sales_quantity AS INT64) AS revised_rate_sales_quantity,
-  royalty_change_sales_amount AS revised_rate_sales_amount,
-  royalty_reservation_upper_limit AS payment_hold_limit_amount,
-  NULLIF(TRIM(tax_withholding_type), '') AS withholding_tax_type,
-  CAST(NULL AS STRING) AS source_file_id,
-  'ice_qb_aggregation.sf_biblio_contributor_conditions' AS source_file_name,
-  CAST(NULL AS STRING) AS source_sheet_name,
-  CURRENT_TIMESTAMP() AS loaded_at
-FROM `{{ project_id }}.ice_qb_aggregation.sf_biblio_contributor_conditions`
-WHERE COALESCE(
-  NULLIF(TRIM(product_code), ''),
-  NULLIF(TRIM(contributor_id), ''),
-  NULLIF(TRIM(contributor_name), ''),
-  NULLIF(TRIM(title), '')
-) IS NOT NULL;
+-- Product master and author conditions are maintained as existing BigQuery
+-- reference tables in royalty_source. Do not rebuild them from
+-- ice_qb_aggregation here because that dataset is in a different location.
 
 CREATE OR REPLACE TABLE `{{ project_id }}.{{ source_dataset }}.source_ep_statement_detail` AS
 SELECT
