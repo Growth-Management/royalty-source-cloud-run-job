@@ -175,8 +175,6 @@ def classify_source_file(file_name: str) -> SourceKind | None:
 def extract_target_month(file_name: str) -> str | None:
     source_kind = classify_source_file(file_name)
     if source_kind == SourceKind.PF_SALES_REPORT:
-        # PF report filenames use the export timestamp. The file content is the
-        # previous month's sales (for example 20260304... contains 2026-02 sales).
         match = re.search(r"【PF】販売レポート_(20\d{2})(0[1-9]|1[0-2])\d{2}", file_name)
         if not match:
             return None
@@ -185,7 +183,15 @@ def extract_target_month(file_name: str) -> str | None:
         return sales_month.strftime("%Y%m")
 
     match = re.search(r"(20\d{2})(?:年|[-_])?(0[1-9]|1[0-2])", file_name)
-    return "".join(match.groups()) if match else None
+    if not match:
+        return None
+    month = datetime(int(match.group(1)), int(match.group(2)), 1)
+    if source_kind == SourceKind.AMAZON_POD_MONTHLY:
+        # The legacy import workbook is named for its download/source month.
+        # The Access-compatible rows inside are the following sales month.
+        next_month = (month.replace(day=28) + timedelta(days=4)).replace(day=1)
+        return next_month.strftime("%Y%m")
+    return month.strftime("%Y%m")
 
 
 def select_source_files(files: Iterable[DriveFile], target_month: str | None) -> list[DriveFile]:
