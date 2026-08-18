@@ -130,6 +130,7 @@ class PodParser:
     ) -> list[ParsedSheet]:
         excel = pd.ExcelFile(BytesIO(payload), engine="openpyxl")
         result: list[ParsedSheet] = []
+        amazon_sales_month = _previous_month(target_month)
         for sheet_name in excel.sheet_names:
             raw = excel.parse(sheet_name, dtype=str, header=None).fillna("")
             header_index = self._find_access_header(raw)
@@ -174,7 +175,7 @@ class PodParser:
                     record[field] = _clean(row[col_index]) if col_index is not None and col_index < len(row) else ""
                 if not any(str(record.get(field, "")).strip() for field in ("product_code", "isbn", "title", "quantity", "sales_amount")):
                     continue
-                if source_kind == SourceKind.AMAZON_POD_MONTHLY and _month(record.get("sales_month", "")) != target_month:
+                if source_kind == SourceKind.AMAZON_POD_MONTHLY and _month(record.get("sales_month", "")) != amazon_sales_month:
                     continue
                 rows.append(record)
             if not rows:
@@ -182,7 +183,10 @@ class PodParser:
             mapped = pd.DataFrame(rows)
             result.append(self._sheet(sheet_name, raw, mapped, header_index + 1))
         if not result:
-            raise ParseValidationError(f"no POD sales rows found for target_month={target_month}")
+            expected_month = amazon_sales_month if source_kind == SourceKind.AMAZON_POD_MONTHLY else target_month
+            raise ParseValidationError(
+                f"no POD sales rows found for target_month={target_month} (expected sales_month={expected_month})"
+            )
         return result
 
     def _find_access_header(self, dataframe: pd.DataFrame) -> int | None:
@@ -235,3 +239,15 @@ def _month(value: object) -> str:
         return ""
     month = int(match.group(2))
     return f"{match.group(1)}{month:02d}" if 1 <= month <= 12 else ""
+
+
+def _previous_month(value: str) -> str:
+    if not re.fullmatch(r"20\d{4}", value):
+        raise ParseValidationError(f"target_month must use YYYYMM format: {value}")
+    year = int(value[:4])
+    month = int(value[4:])
+    if not 1 <= month <= 12:
+        raise ParseValidationError(f"target_month contains invalid month: {value}")
+    if month == 1:
+        return f"{year - 1}12"
+    return f"{year}{month - 1:02d}"
