@@ -172,38 +172,47 @@ def workbook_rows(report: dict[str, Any] | None, target_month: str, run_id: str,
 
 
 def constraint_rows(report: dict[str, Any] | None, target_month: str, run_id: str, recorded_at: str) -> list[dict[str, Any]]:
+    """Convert validate_output_constraints.py's top-level `results` structure."""
     if not report:
         return []
     rows: list[dict[str, Any]] = []
-    for workbook in report.get("workbooks", []):
-        workbook_errors = len(workbook.get("errors", []))
-        workbook_warnings = len(workbook.get("warnings", []))
-        for sheet in workbook.get("sheets", []):
-            required = sheet.get("required") or sheet.get("required_columns") or {}
-            duplicate = sheet.get("duplicates") or sheet.get("duplicate_keys") or {}
-            required_null_count = required.get("null_count", required.get("null_or_blank_count", 0))
-            duplicate_group_count = duplicate.get("group_count", duplicate.get("duplicate_group_count", 0))
-            duplicate_extra_row_count = duplicate.get("extra_row_count", duplicate.get("duplicate_extra_row_count", 0))
-            sheet_errors = sheet.get("errors", [])
-            result = "PASS" if not sheet_errors and workbook_errors == 0 else "FAIL"
-            rows.append(
-                {
-                    "recorded_at": recorded_at,
-                    "target_month": target_month,
-                    "github_run_id": run_id,
-                    "workbook_kind": workbook.get("kind"),
-                    "workbook_file": workbook.get("file"),
-                    "sheet_name": sheet.get("name"),
-                    "table_name": sheet.get("table"),
-                    "result": result,
-                    "required_null_count": int(required_null_count or 0),
-                    "duplicate_group_count": int(duplicate_group_count or 0),
-                    "duplicate_extra_row_count": int(duplicate_extra_row_count or 0),
-                    "error_count": workbook_errors + len(sheet_errors),
-                    "warning_count": workbook_warnings + len(sheet.get("warnings", [])),
-                    "detail_json": json.dumps(sheet, ensure_ascii=False, default=str),
-                }
-            )
+    for result in report.get("results", []):
+        missing = result.get("missing_columns") or []
+        excel_nulls = result.get("excel_required_null_counts") or result.get("required_null_counts") or {}
+        required_null_count = sum(int(value or 0) for value in excel_nulls.values())
+        duplicate_group_count = result.get("excel_duplicate_key_groups")
+        if duplicate_group_count is None:
+            duplicate_group_count = result.get("duplicate_key_groups") or 0
+        duplicate_extra_row_count = result.get("excel_duplicate_rows")
+        if duplicate_extra_row_count is None:
+            duplicate_extra_row_count = result.get("duplicate_rows") or 0
+
+        checks = [
+            not missing,
+            bool(result.get("null_counts_match", not missing)),
+            bool(result.get("required_valid", not missing and required_null_count == 0)),
+            bool(result.get("duplicate_counts_match", not missing)),
+            bool(result.get("keys_unique", not missing and int(duplicate_group_count or 0) == 0)),
+        ]
+        error_count = sum(1 for check in checks if not check)
+        rows.append(
+            {
+                "recorded_at": recorded_at,
+                "target_month": target_month,
+                "github_run_id": run_id,
+                "workbook_kind": "pod" if result.get("sheet") == "pod_sales" else "access",
+                "workbook_file": None,
+                "sheet_name": result.get("sheet"),
+                "table_name": result.get("table"),
+                "result": "PASS" if all(checks) else "FAIL",
+                "required_null_count": required_null_count,
+                "duplicate_group_count": int(duplicate_group_count or 0),
+                "duplicate_extra_row_count": int(duplicate_extra_row_count or 0),
+                "error_count": error_count,
+                "warning_count": 0,
+                "detail_json": json.dumps(result, ensure_ascii=False, default=str),
+            }
+        )
     return rows
 
 
@@ -221,6 +230,18 @@ def count_value(report: dict[str, Any] | None, key: str) -> int:
         return int(value or 0)
     except (TypeError, ValueError):
         return 0
+
+
+def constraint_error_count(report: dict[str, Any] | None) -> int:
+    if not report:
+        return 0
+    return sum(1 for result in report.get("results", []) if (
+        result.get("missing_columns")
+        or not result.get("null_counts_match", True)
+        or not result.get("required_valid", True)
+        or not result.get("duplicate_counts_match", True)
+        or not result.get("keys_unique", True)
+    ))
 
 
 def main() -> None:
@@ -267,10 +288,10 @@ def main() -> None:
         "pipeline_audit_status": audit_status,
         "workbook_error_count": count_value(validation, "error_count"),
         "workbook_warning_count": count_value(validation, "warning_count"),
-        "constraint_error_count": count_value(constraints, "error_count"),
-        "constraint_warning_count": count_value(constraints, "warning_count"),
-        "audit_error_count": count_value(audit, "error_count"),
-        "audit_warning_count": count_value(audit, "warning_count"),
+        "constraint_error_count": constraint_error_count(constraints),
+        "constraint_warning_count": 0,
+        "audit_error_count": count_value(audit, "quality_error_count") + count_value((audit or {}).get("audit"), "error_count"),
+        "audit_warning_count": count_value((audit or {}).get("audit"), "warning_count"),
         "all_pass": all_pass,
         "detail_json": json.dumps(
             {"validation": validation, "constraints": constraints, "audit": audit},
