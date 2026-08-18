@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import StrEnum
 import io
 import re
@@ -153,9 +153,15 @@ def classify_source_file(file_name: str) -> SourceKind | None:
         return SourceKind.PRODUCT_MASTER
     if re.fullmatch(r"【著者条件一覧】report.*\.xls", file_name, flags=re.IGNORECASE):
         return SourceKind.AUTHOR_CONDITIONS
-    if re.fullmatch(r"電子出版確報明細データICE_.*反映版\.xlsx", file_name, flags=re.IGNORECASE):
+    if (
+        re.fullmatch(r"電子出版確報明細データICE_.*反映版\.xlsx", file_name, flags=re.IGNORECASE)
+        or re.fullmatch(r"20\d{2}[-_](0[1-9]|1[0-2])_電子出版確報明細データICE\.xlsx", file_name, flags=re.IGNORECASE)
+    ):
         return SourceKind.EP_STATEMENT_DETAIL
-    if re.fullmatch(r"月別電子出版プロダクト別売上一覧\(ICE印税用\)_.*反映版\.xlsx", file_name, flags=re.IGNORECASE):
+    if (
+        re.fullmatch(r"月別電子出版プロダクト別売上一覧\(ICE印税用\)_.*反映版\.xlsx", file_name, flags=re.IGNORECASE)
+        or re.fullmatch(r"20\d{2}[-_](0[1-9]|1[0-2])_月別電子出版プロダクト別売上一覧\(ICE印税用\)\.xlsx", file_name, flags=re.IGNORECASE)
+    ):
         return SourceKind.MONTHLY_PRODUCT_SALES
     if re.fullmatch(r"⑤POD販売報告データ\.xlsx", file_name, flags=re.IGNORECASE):
         return SourceKind.POD_ACCESS_HISTORY
@@ -167,9 +173,18 @@ def classify_source_file(file_name: str) -> SourceKind | None:
 
 
 def extract_target_month(file_name: str) -> str | None:
-    if classify_source_file(file_name) == SourceKind.PF_SALES_REPORT:
-        return None
-    match = re.search(r"(20\d{2})(?:年)?(0[1-9]|1[0-2])", file_name)
+    source_kind = classify_source_file(file_name)
+    if source_kind == SourceKind.PF_SALES_REPORT:
+        # PF report filenames use the export timestamp. The file content is the
+        # previous month's sales (for example 20260304... contains 2026-02 sales).
+        match = re.search(r"【PF】販売レポート_(20\d{2})(0[1-9]|1[0-2])\d{2}", file_name)
+        if not match:
+            return None
+        exported = datetime(int(match.group(1)), int(match.group(2)), 1)
+        sales_month = exported - timedelta(days=1)
+        return sales_month.strftime("%Y%m")
+
+    match = re.search(r"(20\d{2})(?:年|[-_])?(0[1-9]|1[0-2])", file_name)
     return "".join(match.groups()) if match else None
 
 
@@ -197,21 +212,18 @@ def _select_optional(source_kind: SourceKind, candidates: list[DriveFile], targe
         return _latest_unique(source_kind, candidates) if target_month is None else None
     if target_month:
         matches = [file for file in candidates if file.target_month == target_month]
-        if matches:
-            return _latest_unique(source_kind, matches)
-        if source_kind == SourceKind.PF_SALES_REPORT:
-            return _latest_unique(source_kind, candidates)
-        return None
+        return _latest_unique(source_kind, matches) if matches else None
     return _latest_unique(source_kind, candidates)
 
 
 def _select_one(source_kind: SourceKind, candidates: list[DriveFile], target_month: str | None) -> DriveFile:
     if target_month:
         matches = [file for file in candidates if file.target_month == target_month]
-        if len(matches) == 1:
-            return matches[0]
-        if len(matches) > 1:
-            return _latest_unique(source_kind, matches)
+        if not matches:
+            raise FileNotFoundError(
+                f"required Drive source file not found for {target_month}: {SOURCE_KIND_LABELS[source_kind]}"
+            )
+        return _latest_unique(source_kind, matches)
     return _latest_unique(source_kind, candidates)
 
 
