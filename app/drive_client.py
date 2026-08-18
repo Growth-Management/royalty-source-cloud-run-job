@@ -9,6 +9,7 @@ from typing import Iterable
 
 
 EXCEL_MIME_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+POD_MONTHLY_START_MONTH = "202603"
 
 
 class SourceKind(StrEnum):
@@ -187,8 +188,8 @@ def extract_target_month(file_name: str) -> str | None:
         return None
     month = datetime(int(match.group(1)), int(match.group(2)), 1)
     if source_kind == SourceKind.AMAZON_POD_MONTHLY:
-        # The legacy import workbook is named for its download/source month.
-        # The Access-compatible rows inside are the following sales month.
+        # Legacy Amazon input files are operationally consumed in the following
+        # processing month (e.g. a 202602 file is a candidate for 202603).
         next_month = (month.replace(day=28) + timedelta(days=4)).replace(day=1)
         return next_month.strftime("%Y%m")
     return month.strftime("%Y%m")
@@ -215,7 +216,11 @@ def _select_optional(source_kind: SourceKind, candidates: list[DriveFile], targe
     if not candidates:
         return None
     if source_kind == SourceKind.POD_ACCESS_HISTORY:
+        # Drive-based Access history is only an initial migration source. The
+        # current implementation prefers the BigQuery history seed instead.
         return _latest_unique(source_kind, candidates) if target_month is None else None
+    if target_month and target_month < POD_MONTHLY_START_MONTH:
+        return None
     if target_month:
         matches = [file for file in candidates if file.target_month == target_month]
         return _latest_unique(source_kind, matches) if matches else None
