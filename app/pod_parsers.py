@@ -155,12 +155,22 @@ class PodParser:
                 "dl_month": ("dl年月", "dl月"),
                 "sales_month": ("年月", "販売月"),
             }
+            pages_index = next(
+                (index_by_name.get(_norm(name)) for name in aliases["pages"] if _norm(name) in index_by_name),
+                None,
+            )
+            positional_fallback = {
+                "dl_month": pages_index + 1 if pages_index is not None else None,
+                "sales_month": pages_index + 2 if pages_index is not None else None,
+            }
             rows: list[dict[str, str | int]] = []
             for row_index in range(header_index + 1, len(raw)):
                 row = raw.iloc[row_index].tolist()
                 record: dict[str, str | int] = {"row_number": row_index + 1}
                 for field, names in aliases.items():
                     col_index = next((index_by_name.get(_norm(name)) for name in names if _norm(name) in index_by_name), None)
+                    if col_index is None and field in positional_fallback:
+                        col_index = positional_fallback[field]
                     record[field] = _clean(row[col_index]) if col_index is not None and col_index < len(row) else ""
                 if not any(str(record.get(field, "")).strip() for field in ("product_code", "isbn", "title", "quantity", "sales_amount")):
                     continue
