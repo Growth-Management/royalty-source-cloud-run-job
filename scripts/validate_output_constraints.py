@@ -50,10 +50,11 @@ SHEET_CONFIG = {
         "workbook": "pod",
         "table": "access_input_pod_sales",
         "required": [
-            "accounting_month",
-            "product_code",
-            "product_key",
-            "billing_code",
+            "sales_month",
+            "isbn",
+            "quantity",
+            "sales_amount",
+            "source_kind",
             "source_file_id",
             "source_row_number",
         ],
@@ -179,138 +180,90 @@ def build_markdown(report: dict[str, Any]) -> str:
         "| Sheet | Column | Excel | BigQuery | Counts match | Required valid |",
         "|---|---|---:|---:|---|---|",
     ]
-    for sheet in report["sheets"]:
-        for result in sheet["required_results"]:
+    for result in report["results"]:
+        sheet_name = result["sheet"]
+        if result.get("missing_columns"):
+            lines.append(f"| {sheet_name} | missing: {', '.join(result['missing_columns'])} | - | - | no | no |")
+            continue
+        for column, excel_count in result["excel_required_null_counts"].items():
+            bq_count = result["bigquery_required_null_counts"][column]
             lines.append(
-                f"| {sheet['sheet']} | {result['column']} | {result['workbook_count']} | "
-                f"{result['bigquery_count']} | {'OK' if result['counts_match'] else 'NG'} | "
-                f"{'OK' if result['valid'] else 'NG'} |"
+                f"| {sheet_name} | {column} | {excel_count} | {bq_count} | "
+                f"{'yes' if excel_count == bq_count else 'no'} | {'yes' if excel_count == 0 else 'no'} |"
             )
-
-    lines.extend(
-        [
-            "",
-            "### Duplicate keys",
-            "",
-            "| Sheet | Key | Excel groups | BQ groups | Excel duplicate rows | BQ duplicate rows | Counts match | Unique |",
-            "|---|---|---:|---:|---:|---:|---|---|",
-        ]
-    )
-    for sheet in report["sheets"]:
-        duplicate = sheet["duplicate_result"]
+    lines.extend([
+        "",
+        "### Duplicate keys",
+        "",
+        "| Sheet | Excel groups | BigQuery groups | Excel extra rows | BigQuery extra rows | Match | Unique |",
+        "|---|---:|---:|---:|---:|---|---|",
+    ])
+    for result in report["results"]:
+        if result.get("missing_columns"):
+            lines.append(f"| {result['sheet']} | - | - | - | - | no | no |")
+            continue
         lines.append(
-            f"| {sheet['sheet']} | {', '.join(sheet['key'])} | {duplicate['workbook_groups']} | "
-            f"{duplicate['bigquery_groups']} | {duplicate['workbook_rows']} | {duplicate['bigquery_rows']} | "
-            f"{'OK' if duplicate['counts_match'] else 'NG'} | {'OK' if duplicate['unique'] else 'NG'} |"
+            f"| {result['sheet']} | {result['excel_duplicate_key_groups']} | {result['bigquery_duplicate_key_groups']} | "
+            f"{result['excel_duplicate_rows']} | {result['bigquery_duplicate_rows']} | "
+            f"{'yes' if result['duplicate_counts_match'] else 'no'} | {'yes' if result['keys_unique'] else 'no'} |"
         )
-
-    errors = report.get("errors", [])
-    lines.extend(["", "### Errors", "", ", ".join(errors) if errors else "none"])
+        if result["excel_duplicate_samples"]:
+            lines.extend(["", f"#### {result['sheet']} duplicate samples", "", "```json", json.dumps(result["excel_duplicate_samples"], ensure_ascii=False, indent=2), "```"])
     return "\n".join(lines) + "\n"
 
 
-def main() -> None:
+def main() -> int:
     args = parse_args()
-    workbook_paths = {"access": Path(args.access), "pod": Path(args.pod)}
-    client = bigquery.Client(project=args.project_id, location=args.location)
-    sheets = []
-    errors: list[str] = []
+    paths = {"access": Path(args.access), "pod": Path(args.pod)}
+    client = bigquery.Client(project=args.project_id)
+    results = []
+    ok = True
 
     for sheet_name, config in SHEET_CONFIG.items():
-        workbook_result = workbook_counts(
-            workbook_paths[config["workbook"]], sheet_name, config["required"], config["key"]
-        )
-        if workbook_result["missing_columns"]:
-            errors.append(f"{sheet_name}:missing_columns:{','.join(workbook_result['missing_columns'])}")
-            sheets.append(
-                {
-                    "sheet": sheet_name,
-                    "table": config["table"],
-                    "required": config["required"],
-                    "key": config["key"],
-                    "required_results": [],
-                    "duplicate_result": {
-                        "workbook_groups": None,
-                        "bigquery_groups": None,
-                        "workbook_rows": None,
-                        "bigquery_rows": None,
-                        "counts_match": False,
-                        "unique": False,
-                    },
-                }
-            )
+        excel = workbook_counts(paths[config["workbook"]], sheet_name, config["required"], config["key"])
+        result: dict[str, Any] = {"sheet": sheet_name, "table": config["table"], "missing_columns": excel["missing_columns"]}
+        if excel["missing_columns"]:
+            result.update(excel)
+            ok = False
+            results.append(result)
             continue
-
-        table_id = f"{args.project_id}.{args.dataset}.{config['table']}"
-        bq_result = bigquery_counts(client, table_id, config["required"], config["key"], args.location)
-        required_results = []
-        for column in config["required"]:
-            workbook_count = workbook_result["required_null_counts"][column]
-            bq_count = bq_result["required_null_counts"][column]
-            counts_match = workbook_count == bq_count
-            valid = workbook_count == 0 and bq_count == 0
-            required_results.append(
-                {
-                    "column": column,
-                    "workbook_count": workbook_count,
-                    "bigquery_count": bq_count,
-                    "counts_match": counts_match,
-                    "valid": valid,
-                }
-            )
-            if not counts_match:
-                errors.append(f"{sheet_name}:{column}:required_null_count_mismatch")
-            if not valid:
-                errors.append(f"{sheet_name}:{column}:required_null_present")
-
+        bq = bigquery_counts(
+            client,
+            f"{args.project_id}.{args.dataset}.{config['table']}",
+            config["required"],
+            config["key"],
+            args.location,
+        )
+        null_counts_match = excel["required_null_counts"] == bq["required_null_counts"]
+        required_valid = all(count == 0 for count in excel["required_null_counts"].values())
         duplicate_counts_match = (
-            workbook_result["duplicate_key_groups"] == bq_result["duplicate_key_groups"]
-            and workbook_result["duplicate_rows"] == bq_result["duplicate_rows"]
+            excel["duplicate_key_groups"] == bq["duplicate_key_groups"]
+            and excel["duplicate_rows"] == bq["duplicate_rows"]
         )
-        unique = workbook_result["duplicate_key_groups"] == 0 and bq_result["duplicate_key_groups"] == 0
-        if not duplicate_counts_match:
-            errors.append(f"{sheet_name}:duplicate_key_count_mismatch")
-        if not unique:
-            errors.append(f"{sheet_name}:duplicate_key_present")
+        keys_unique = excel["duplicate_key_groups"] == 0
+        result.update({
+            "excel_required_null_counts": excel["required_null_counts"],
+            "bigquery_required_null_counts": bq["required_null_counts"],
+            "null_counts_match": null_counts_match,
+            "required_valid": required_valid,
+            "excel_duplicate_key_groups": excel["duplicate_key_groups"],
+            "bigquery_duplicate_key_groups": bq["duplicate_key_groups"],
+            "excel_duplicate_rows": excel["duplicate_rows"],
+            "bigquery_duplicate_rows": bq["duplicate_rows"],
+            "duplicate_counts_match": duplicate_counts_match,
+            "keys_unique": keys_unique,
+            "excel_duplicate_samples": excel["duplicate_samples"],
+            "bigquery_duplicate_samples": bq["duplicate_samples"],
+        })
+        if not (null_counts_match and required_valid and duplicate_counts_match and keys_unique):
+            ok = False
+        results.append(result)
 
-        sheets.append(
-            {
-                "sheet": sheet_name,
-                "table": table_id,
-                "required": config["required"],
-                "key": config["key"],
-                "required_results": required_results,
-                "duplicate_result": {
-                    "workbook_groups": workbook_result["duplicate_key_groups"],
-                    "bigquery_groups": bq_result["duplicate_key_groups"],
-                    "workbook_rows": workbook_result["duplicate_rows"],
-                    "bigquery_rows": bq_result["duplicate_rows"],
-                    "counts_match": duplicate_counts_match,
-                    "unique": unique,
-                    "workbook_samples": workbook_result["duplicate_samples"],
-                    "bigquery_samples": bq_result["duplicate_samples"],
-                },
-            }
-        )
-
-    report = {
-        "ok": not errors,
-        "project_id": args.project_id,
-        "dataset": args.dataset,
-        "errors": errors,
-        "error_count": len(errors),
-        "sheets": sheets,
-    }
-    json_path = Path(args.json_output)
-    markdown_path = Path(args.markdown_output)
-    json_path.parent.mkdir(parents=True, exist_ok=True)
-    markdown_path.parent.mkdir(parents=True, exist_ok=True)
-    json_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
-    markdown_path.write_text(build_markdown(report), encoding="utf-8")
-    print(json.dumps({"ok": report["ok"], "errors": report["error_count"]}))
-    if not report["ok"]:
-        raise SystemExit(1)
+    report = {"ok": ok, "results": results}
+    Path(args.json_output).write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    Path(args.markdown_output).write_text(build_markdown(report), encoding="utf-8")
+    return 0 if ok else 1
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
