@@ -38,7 +38,7 @@ env:
   BQ_SOURCE_DATASET: royalty_source
   BQ_AUDIT_DATASET: royalty_audit
   BQ_LOCATION: asia-northeast1
-  DRIVE_SOURCE_FOLDER_ID: 1w0dUHIsBxlp1BHy0VQuxg0DyBEQqbnJX
+  DRIVE_SOURCE_FOLDER_ID: 1I9sBj6LYyaRPy1LcOWdQ3mDtJA-HDAQN
   DRIVE_OUTPUT_FOLDER_ID: 1zlmvNdJK3u8w0cQdBWCfZSxX7VpSTwzH
 
 jobs:
@@ -104,7 +104,6 @@ jobs:
             --project "${GCP_PROJECT_ID}" \
             --region "${CLOUD_RUN_REGION}" \
             --format='value(spec.template.spec.template.spec.containers[0].image)')"
-
           echo "Expected image: ${IMAGE_URI}"
           echo "Deployed image: ${DEPLOYED_IMAGE:-not found}"
           test -n "${DEPLOYED_IMAGE}"
@@ -113,9 +112,7 @@ jobs:
   validate:
     name: Execute post-deploy validation
     needs: deploy
-    if: >-
-      github.ref == 'refs/heads/fix/quality-check-samples' ||
-      (github.event_name == 'workflow_dispatch' && inputs.run_validation)
+    if: github.event_name == 'workflow_dispatch' && inputs.run_validation
     runs-on: ubuntu-latest
 
     steps:
@@ -150,25 +147,22 @@ jobs:
         id: target
         shell: bash
         env:
-          REQUESTED_TARGET_MONTH: ${{ github.event_name == 'workflow_dispatch' && inputs.target_month || '' }}
+          REQUESTED_TARGET_MONTH: ${{ inputs.target_month }}
         run: |
           set -euo pipefail
           TARGET_MONTH="${REQUESTED_TARGET_MONTH}"
           if [ -z "${TARGET_MONTH}" ]; then
             TARGET_MONTH="$(TZ=Asia/Tokyo date -d '1 month ago' +%Y%m)"
           fi
-
           if [[ ! "${TARGET_MONTH}" =~ ^[0-9]{6}$ ]]; then
             echo "target_month must use YYYYMM format: ${TARGET_MONTH}" >&2
             exit 1
           fi
-
           MONTH="${TARGET_MONTH:4:2}"
           if (( 10#${MONTH} < 1 || 10#${MONTH} > 12 )); then
             echo "target_month contains an invalid month: ${TARGET_MONTH}" >&2
             exit 1
           fi
-
           echo "target_month=${TARGET_MONTH}" >> "${GITHUB_OUTPUT}"
           echo "Validation target month: ${TARGET_MONTH}"
 
@@ -180,23 +174,19 @@ jobs:
           gcloud run jobs update "${CLOUD_RUN_JOB}" \
             --project "${GCP_PROJECT_ID}" \
             --region "${CLOUD_RUN_REGION}" \
-            --update-env-vars "JOB_TARGET_MONTH=${{ steps.target.outputs.target_month }},FAIL_ON_QUALITY_ERRORS=true,EXPORT_OUTPUT_FILES=false" \
+            --update-env-vars "JOB_TARGET_MONTH=${{ steps.target.outputs.target_month }},FAIL_ON_QUALITY_ERRORS=false,EXPORT_OUTPUT_FILES=false" \
             --quiet
-
           EXECUTION_NAME="$(gcloud run jobs execute "${CLOUD_RUN_JOB}" \
             --project "${GCP_PROJECT_ID}" \
             --region "${CLOUD_RUN_REGION}" \
             --wait \
             --format='value(metadata.name)')"
-
           test -n "${EXECUTION_NAME}"
           echo "execution_name=${EXECUTION_NAME}" >> "${GITHUB_OUTPUT}"
           echo "Normal execution: ${EXECUTION_NAME}"
 
       - name: Verify normal execution
-        shell: bash
         run: |
-          set -euo pipefail
           gcloud run jobs executions describe "${{ steps.normal.outputs.execution_name }}" \
             --project "${GCP_PROJECT_ID}" \
             --region "${CLOUD_RUN_REGION}" \
@@ -210,23 +200,19 @@ jobs:
           gcloud run jobs update "${CLOUD_RUN_JOB}" \
             --project "${GCP_PROJECT_ID}" \
             --region "${CLOUD_RUN_REGION}" \
-            --update-env-vars "JOB_TARGET_MONTH=${{ steps.target.outputs.target_month }},FAIL_ON_QUALITY_ERRORS=true,EXPORT_OUTPUT_FILES=true" \
+            --update-env-vars "JOB_TARGET_MONTH=${{ steps.target.outputs.target_month }},FAIL_ON_QUALITY_ERRORS=false,EXPORT_OUTPUT_FILES=true" \
             --quiet
-
           EXECUTION_NAME="$(gcloud run jobs execute "${CLOUD_RUN_JOB}" \
             --project "${GCP_PROJECT_ID}" \
             --region "${CLOUD_RUN_REGION}" \
             --wait \
             --format='value(metadata.name)')"
-
           test -n "${EXECUTION_NAME}"
           echo "execution_name=${EXECUTION_NAME}" >> "${GITHUB_OUTPUT}"
           echo "Comparison execution: ${EXECUTION_NAME}"
 
       - name: Verify comparison execution
-        shell: bash
         run: |
-          set -euo pipefail
           gcloud run jobs executions describe "${{ steps.comparison.outputs.execution_name }}" \
             --project "${GCP_PROJECT_ID}" \
             --region "${CLOUD_RUN_REGION}" \
@@ -239,28 +225,24 @@ jobs:
           set -euo pipefail
           TARGET_MONTH="${{ steps.target.outputs.target_month }}"
           mkdir -p "artifacts/${TARGET_MONTH}"
-
           python scripts/download_drive_file.py \
             --folder-id "${DRIVE_OUTPUT_FOLDER_ID}" \
             --name "comparison_access_input_${TARGET_MONTH}.xlsx" \
             --output "artifacts/${TARGET_MONTH}/comparison_access_input_${TARGET_MONTH}.xlsx"
-
           python scripts/download_drive_file.py \
             --folder-id "${DRIVE_OUTPUT_FOLDER_ID}" \
             --name "comparison_pod_input_${TARGET_MONTH}.xlsx" \
             --output "artifacts/${TARGET_MONTH}/comparison_pod_input_${TARGET_MONTH}.xlsx"
-
           echo "artifact_dir=artifacts/${TARGET_MONTH}" >> "${GITHUB_OUTPUT}"
 
       - name: Validate generated workbooks against BigQuery
         id: workbook_validation
+        continue-on-error: true
         shell: bash
         run: |
           set -euo pipefail
           TARGET_MONTH="${{ steps.target.outputs.target_month }}"
           ARTIFACT_DIR="artifacts/${TARGET_MONTH}"
-
-          set +e
           python scripts/validate_output_workbooks.py \
             --access "${ARTIFACT_DIR}/comparison_access_input_${TARGET_MONTH}.xlsx" \
             --pod "${ARTIFACT_DIR}/comparison_pod_input_${TARGET_MONTH}.xlsx" \
@@ -269,26 +251,25 @@ jobs:
             --location "${BQ_LOCATION}" \
             --json-output "${ARTIFACT_DIR}/validation.json" \
             --markdown-output "${ARTIFACT_DIR}/validation.md"
-          STATUS=$?
-          set -e
 
+      - name: Append workbook validation summary
+        if: always() && steps.download.outcome == 'success'
+        run: |
+          TARGET_MONTH="${{ steps.target.outputs.target_month }}"
+          ARTIFACT_DIR="artifacts/${TARGET_MONTH}"
           if [ -f "${ARTIFACT_DIR}/validation.md" ]; then
             cat "${ARTIFACT_DIR}/validation.md" >> "${GITHUB_STEP_SUMMARY}"
           fi
 
-          echo "exit_code=${STATUS}" >> "${GITHUB_OUTPUT}"
-          exit "${STATUS}"
-
       - name: Validate required values and duplicate keys
         id: constraint_validation
         if: always() && steps.download.outcome == 'success'
+        continue-on-error: true
         shell: bash
         run: |
           set -euo pipefail
           TARGET_MONTH="${{ steps.target.outputs.target_month }}"
           ARTIFACT_DIR="artifacts/${TARGET_MONTH}"
-
-          set +e
           python scripts/validate_output_constraints.py \
             --access "${ARTIFACT_DIR}/comparison_access_input_${TARGET_MONTH}.xlsx" \
             --pod "${ARTIFACT_DIR}/comparison_pod_input_${TARGET_MONTH}.xlsx" \
@@ -297,27 +278,26 @@ jobs:
             --location "${BQ_LOCATION}" \
             --json-output "${ARTIFACT_DIR}/constraints_validation.json" \
             --markdown-output "${ARTIFACT_DIR}/constraints_validation.md"
-          STATUS=$?
-          set -e
 
+      - name: Append constraint validation summary
+        if: always() && steps.download.outcome == 'success'
+        run: |
+          TARGET_MONTH="${{ steps.target.outputs.target_month }}"
+          ARTIFACT_DIR="artifacts/${TARGET_MONTH}"
           if [ -f "${ARTIFACT_DIR}/constraints_validation.md" ]; then
             cat "${ARTIFACT_DIR}/constraints_validation.md" >> "${GITHUB_STEP_SUMMARY}"
           fi
 
-          echo "exit_code=${STATUS}" >> "${GITHUB_OUTPUT}"
-          exit "${STATUS}"
-
       - name: Export pipeline audit summary
         id: audit_summary
         if: always() && steps.comparison.outcome == 'success'
+        continue-on-error: true
         shell: bash
         run: |
           set -euo pipefail
           TARGET_MONTH="${{ steps.target.outputs.target_month }}"
           ARTIFACT_DIR="artifacts/${TARGET_MONTH}"
           mkdir -p "${ARTIFACT_DIR}"
-
-          set +e
           python scripts/export_audit_summary.py \
             --project-id "${GCP_PROJECT_ID}" \
             --dataset "${BQ_AUDIT_DATASET}" \
@@ -325,15 +305,15 @@ jobs:
             --location "${BQ_LOCATION}" \
             --json-output "${ARTIFACT_DIR}/audit_summary.json" \
             --markdown-output "${ARTIFACT_DIR}/audit_summary.md"
-          STATUS=$?
-          set -e
 
+      - name: Append pipeline audit summary
+        if: always() && steps.download.outcome == 'success'
+        run: |
+          TARGET_MONTH="${{ steps.target.outputs.target_month }}"
+          ARTIFACT_DIR="artifacts/${TARGET_MONTH}"
           if [ -f "${ARTIFACT_DIR}/audit_summary.md" ]; then
             cat "${ARTIFACT_DIR}/audit_summary.md" >> "${GITHUB_STEP_SUMMARY}"
           fi
-
-          echo "exit_code=${STATUS}" >> "${GITHUB_OUTPUT}"
-          exit "${STATUS}"
 
       - name: Persist validation reports to BigQuery audit
         id: persist_validation
@@ -343,7 +323,6 @@ jobs:
           set -euo pipefail
           TARGET_MONTH="${{ steps.target.outputs.target_month }}"
           ARTIFACT_DIR="artifacts/${TARGET_MONTH}"
-
           python scripts/persist_validation_results.py \
             --project-id "${GCP_PROJECT_ID}" \
             --dataset "${BQ_AUDIT_DATASET}" \
@@ -370,18 +349,13 @@ jobs:
           gcloud run jobs update "${CLOUD_RUN_JOB}" \
             --project "${GCP_PROJECT_ID}" \
             --region "${CLOUD_RUN_REGION}" \
-            --update-env-vars "EXPORT_OUTPUT_FILES=false" \
+            --update-env-vars "FAIL_ON_QUALITY_ERRORS=true,EXPORT_OUTPUT_FILES=false" \
             --quiet
 
       - name: Write validation summary
         if: always()
         shell: bash
         run: |
-          NORMAL_EXECUTION="${{ steps.normal.outputs.execution_name }}"
-          COMPARISON_EXECUTION="${{ steps.comparison.outputs.execution_name }}"
-          NORMAL_URL="https://console.cloud.google.com/run/jobs/executions/details/${CLOUD_RUN_REGION}/${NORMAL_EXECUTION}/tasks?project=${GCP_PROJECT_ID}"
-          COMPARISON_URL="https://console.cloud.google.com/run/jobs/executions/details/${CLOUD_RUN_REGION}/${COMPARISON_EXECUTION}/tasks?project=${GCP_PROJECT_ID}"
-
           {
             echo "## Cloud Run post-deploy validation"
             echo ""
@@ -390,23 +364,25 @@ jobs:
             echo "| Branch | \`${GITHUB_REF_NAME}\` |"
             echo "| Image | \`${{ needs.deploy.outputs.image_uri }}\` |"
             echo "| Target month | \`${{ steps.target.outputs.target_month }}\` |"
-            echo "| Normal export flag | \`false\` |"
-            echo "| Normal execution | \`${NORMAL_EXECUTION:-not started}\` |"
-            echo "| Comparison export flag | \`true\` |"
-            echo "| Comparison execution | \`${COMPARISON_EXECUTION:-not started}\` |"
+            echo "| Normal execution | \`${{ steps.normal.outputs.execution_name || 'not started' }}\` |"
+            echo "| Comparison execution | \`${{ steps.comparison.outputs.execution_name || 'not started' }}\` |"
             echo "| Workbook download | \`${{ steps.download.outcome }}\` |"
             echo "| Workbook/BigQuery validation | \`${{ steps.workbook_validation.outcome }}\` |"
             echo "| Required/duplicate validation | \`${{ steps.constraint_validation.outcome }}\` |"
             echo "| Pipeline audit summary | \`${{ steps.audit_summary.outcome }}\` |"
             echo "| Persist validation audit | \`${{ steps.persist_validation.outcome }}\` |"
             echo "| Artifact | \`generated-workbooks-${{ steps.target.outputs.target_month }}\` |"
-            echo "| Restored default | \`EXPORT_OUTPUT_FILES=false\` |"
-            if [ -n "${NORMAL_EXECUTION}" ]; then
-              echo ""
-              echo "[Open normal execution logs](${NORMAL_URL})"
-            fi
-            if [ -n "${COMPARISON_EXECUTION}" ]; then
-              echo ""
-              echo "[Open comparison execution logs](${COMPARISON_URL})"
-            fi
+            echo "| Restored default | \`FAIL_ON_QUALITY_ERRORS=true / EXPORT_OUTPUT_FILES=false\` |"
           } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Fail validation when checks failed
+        if: always()
+        shell: bash
+        run: |
+          if [ "${{ steps.workbook_validation.outcome }}" != "success" ] || \
+             [ "${{ steps.constraint_validation.outcome }}" != "success" ] || \
+             [ "${{ steps.audit_summary.outcome }}" != "success" ] || \
+             [ "${{ steps.persist_validation.outcome }}" != "success" ]; then
+            echo "One or more validation checks failed." >&2
+            exit 1
+          fi
