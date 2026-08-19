@@ -35,7 +35,7 @@ def sync_legacy_author_lookup(
     source_sql = f"""
         SELECT
             CONCAT('01-', product_code) AS product_key
-            , ANY_VALUE(digital_pub_code) AS electronic_publication_code
+            , digital_pub_code AS electronic_publication_code
             , COUNT(*) OVER () AS product_count
             , SUM(author_rows) OVER () AS source_rows
         FROM (
