@@ -119,11 +119,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Authenticate to Google Cloud
+      - name: Authenticate validation runtime to Google Cloud
         uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ secrets.GCP_DEPLOY_WORKLOAD_IDENTITY_PROVIDER }}
-          service_account: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT }}
+          service_account: ${{ vars.CLOUD_RUN_RUNTIME_SERVICE_ACCOUNT }}
 
       - name: Set up gcloud
         uses: google-github-actions/setup-gcloud@v2
@@ -220,6 +220,7 @@ jobs:
 
       - name: Download generated workbooks from Drive
         id: download
+        continue-on-error: true
         shell: bash
         run: |
           set -euo pipefail
@@ -237,6 +238,7 @@ jobs:
 
       - name: Validate generated workbooks against BigQuery
         id: workbook_validation
+        if: always() && steps.download.outcome == 'success'
         continue-on-error: true
         shell: bash
         run: |
@@ -253,7 +255,7 @@ jobs:
             --markdown-output "${ARTIFACT_DIR}/validation.md"
 
       - name: Append workbook validation summary
-        if: always() && steps.download.outcome == 'success'
+        if: always()
         run: |
           TARGET_MONTH="${{ steps.target.outputs.target_month }}"
           ARTIFACT_DIR="artifacts/${TARGET_MONTH}"
@@ -280,7 +282,7 @@ jobs:
             --markdown-output "${ARTIFACT_DIR}/constraints_validation.md"
 
       - name: Append constraint validation summary
-        if: always() && steps.download.outcome == 'success'
+        if: always()
         run: |
           TARGET_MONTH="${{ steps.target.outputs.target_month }}"
           ARTIFACT_DIR="artifacts/${TARGET_MONTH}"
@@ -307,7 +309,7 @@ jobs:
             --markdown-output "${ARTIFACT_DIR}/audit_summary.md"
 
       - name: Append pipeline audit summary
-        if: always() && steps.download.outcome == 'success'
+        if: always()
         run: |
           TARGET_MONTH="${{ steps.target.outputs.target_month }}"
           ARTIFACT_DIR="artifacts/${TARGET_MONTH}"
@@ -317,7 +319,8 @@ jobs:
 
       - name: Persist validation reports to BigQuery audit
         id: persist_validation
-        if: always() && steps.download.outcome == 'success'
+        if: always() && steps.download.outcome == 'success' && steps.audit_summary.outcome == 'success'
+        continue-on-error: true
         shell: bash
         run: |
           set -euo pipefail
@@ -334,12 +337,12 @@ jobs:
             --audit-summary-json "${ARTIFACT_DIR}/audit_summary.json"
 
       - name: Upload generated workbook artifacts
-        if: always() && steps.download.outcome == 'success'
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: generated-workbooks-${{ steps.target.outputs.target_month }}
-          path: ${{ steps.download.outputs.artifact_dir }}
-          if-no-files-found: error
+          path: artifacts/${{ steps.target.outputs.target_month }}
+          if-no-files-found: warn
           retention-days: 30
 
       - name: Restore safe default
@@ -379,7 +382,8 @@ jobs:
         if: always()
         shell: bash
         run: |
-          if [ "${{ steps.workbook_validation.outcome }}" != "success" ] || \
+          if [ "${{ steps.download.outcome }}" != "success" ] || \
+             [ "${{ steps.workbook_validation.outcome }}" != "success" ] || \
              [ "${{ steps.constraint_validation.outcome }}" != "success" ] || \
              [ "${{ steps.audit_summary.outcome }}" != "success" ] || \
              [ "${{ steps.persist_validation.outcome }}" != "success" ]; then
