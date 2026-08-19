@@ -77,6 +77,10 @@ def sync_legacy_author_lookup(
     )
 
     target_client = bigquery.Client(project=project_id, location=target_location)
+    dataset = bigquery.Dataset(f"{project_id}.{target_dataset}")
+    dataset.location = target_location
+    target_client.create_dataset(dataset, exists_ok=True)
+
     table_id = f"{project_id}.{target_dataset}.{LEGACY_LOOKUP_TABLE}"
     schema = [
         bigquery.SchemaField("product_key", "STRING", mode="REQUIRED"),
