@@ -119,11 +119,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Authenticate validation runtime to Google Cloud
+      - name: Authenticate deployer for Cloud Run validation control
         uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ secrets.GCP_DEPLOY_WORKLOAD_IDENTITY_PROVIDER }}
-          service_account: ${{ vars.CLOUD_RUN_RUNTIME_SERVICE_ACCOUNT }}
+          service_account: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT }}
 
       - name: Set up gcloud
         uses: google-github-actions/setup-gcloud@v2
@@ -217,6 +217,12 @@ jobs:
             --project "${GCP_PROJECT_ID}" \
             --region "${CLOUD_RUN_REGION}" \
             --format="yaml(metadata.name,status.succeededCount,status.failedCount,status.conditions)"
+
+      - name: Authenticate runtime for Drive and BigQuery validation
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_DEPLOY_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.CLOUD_RUN_RUNTIME_SERVICE_ACCOUNT }}
 
       - name: Download generated workbooks from Drive
         id: download
@@ -344,6 +350,13 @@ jobs:
           path: artifacts/${{ steps.target.outputs.target_month }}
           if-no-files-found: warn
           retention-days: 30
+
+      - name: Re-authenticate deployer for safe-default restore
+        if: always()
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_DEPLOY_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT }}
 
       - name: Restore safe default
         if: always()
