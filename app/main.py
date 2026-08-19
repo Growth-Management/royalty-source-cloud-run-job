@@ -4,6 +4,7 @@ import logging
 import os
 import sys
 
+from app.legacy_migration import sync_legacy_author_lookup
 from app.pipeline import SourcePipeline
 from app.settings import Settings
 
@@ -22,6 +23,18 @@ def main() -> int:
     try:
         settings = Settings.from_env()
         configure_logging(settings.log_level)
+        if settings.job_target_month:
+            legacy_rows = sync_legacy_author_lookup(
+                project_id=settings.gcp_project_id,
+                target_dataset=settings.bq_source_dataset,
+                target_month=settings.job_target_month,
+                target_location=settings.bq_location,
+            )
+            if legacy_rows:
+                logger.info(
+                    "legacy 202602 author lookup synchronized",
+                    extra={"legacy_lookup_rows": legacy_rows},
+                )
         stats = SourcePipeline(settings).run()
         logger.info("pipeline completed", extra={"run_id": stats.run_id, "raw_rows_loaded": stats.raw_rows_loaded})
         return 0
