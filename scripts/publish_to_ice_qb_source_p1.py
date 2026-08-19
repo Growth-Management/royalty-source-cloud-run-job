@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Publish a validated monthly snapshot into ice_qb_source_p1.
 
-The source cumulative dataset is in asia-northeast1 while ice_qb_source_p1 is in
-US. BigQuery cannot query across those locations, so this job transfers the
-validated monthly rows through the client into temporary US tables and then
-performs a single US transaction across the three production tables.
+The validated cumulative dataset is in asia-northeast1 while ice_qb_source_p1
+is in US. The job transfers mapped rows through the client into temporary US
+tables, compares them as multisets, and when apply=true performs one US
+transaction across the three production tables.
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ import json
 import os
 import uuid
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
 
 import pandas as pd
@@ -23,7 +24,6 @@ from google.cloud import bigquery
 @dataclass(frozen=True)
 class TableConfig:
     key: str
-    source_table: str
     target_table: str
     month_column: str
     source_sql: str
@@ -76,7 +76,6 @@ def table_configs(project_id: str, source_dataset: str) -> list[TableConfig]:
     return [
         TableConfig(
             key="sales",
-            source_table="sales",
             target_table="wholesale_sales_report",
             month_column="year_month",
             source_sql=f"""
@@ -109,7 +108,6 @@ def table_configs(project_id: str, source_dataset: str) -> list[TableConfig]:
         ),
         TableConfig(
             key="store",
-            source_table="store_detail",
             target_table="bookstore_dl_quantity",
             month_column="year_month",
             source_sql=f"""
@@ -131,7 +129,6 @@ def table_configs(project_id: str, source_dataset: str) -> list[TableConfig]:
         ),
         TableConfig(
             key="pod",
-            source_table="pod_sales",
             target_table="pod_sales_summary",
             month_column="year_month",
             source_sql=f"""
@@ -161,16 +158,23 @@ def table_configs(project_id: str, source_dataset: str) -> list[TableConfig]:
     ]
 
 
+def month_query_config(target_month: str) -> bigquery.QueryJobConfig:
+    return bigquery.QueryJobConfig(
+        query_parameters=[bigquery.ScalarQueryParameter("target_month", "STRING", target_month)]
+    )
+
+
 def query_dataframe(
     client: bigquery.Client,
     sql: str,
     location: str,
     target_month: str,
 ) -> pd.DataFrame:
-    config = bigquery.QueryJobConfig(
-        query_parameters=[bigquery.ScalarQueryParameter("target_month", "STRING", target_month)]
-    )
-    iterator = client.query(sql, job_config=config, location=location).result()
+    iterator = client.query(
+        sql,
+        job_config=month_query_config(target_month),
+        location=location,
+    ).result()
     columns = [field.name for field in iterator.schema]
     return pd.DataFrame.from_records([dict(row.items()) for row in iterator], columns=columns)
 
@@ -218,11 +222,14 @@ def get_promotion_gate(
     audit_dataset: str,
     location: str,
     target_month: str,
-) -> tuple[str, Any]:
+) -> dict[str, Any]:
     sql = f"""
         SELECT
             validation_github_run_id
             , promoted_at
+            , sales_rows
+            , store_rows
+            , pod_rows
         FROM
             `{project_id}.{audit_dataset}.cumulative_promotion_log`
         WHERE
@@ -232,25 +239,38 @@ def get_promotion_gate(
             promoted_at DESC
         LIMIT 1
     """
-    config = bigquery.QueryJobConfig(
-        query_parameters=[bigquery.ScalarQueryParameter("target_month", "STRING", target_month)]
+    rows = list(
+        client.query(
+            sql,
+            job_config=month_query_config(target_month),
+            location=location,
+        ).result()
     )
-    rows = list(client.query(sql, job_config=config, location=location).result())
     if not rows:
         raise RuntimeError(f"{target_month} has not been promoted to royalty_cumulative")
-    return str(rows[0].validation_github_run_id), rows[0].promoted_at
+    row = rows[0]
+    return {
+        "run_id": str(row.validation_github_run_id),
+        "promoted_at": row.promoted_at,
+        "sales_rows": int(row.sales_rows or 0),
+        "store_rows": int(row.store_rows or 0),
+        "pod_rows": int(row.pod_rows or 0),
+    }
 
 
-def validate_cumulative_run_ids(
+def validate_cumulative_snapshot(
     client: bigquery.Client,
     project_id: str,
     source_dataset: str,
     location: str,
     target_month: str,
-    expected_run_id: str,
+    gate: dict[str, Any],
 ) -> None:
-    checks = []
-    for table in ("sales", "store_detail", "pod_sales"):
+    for table, expected_count in (
+        ("sales", gate["sales_rows"]),
+        ("store_detail", gate["store_rows"]),
+        ("pod_sales", gate["pod_rows"]),
+    ):
         sql = f"""
             SELECT
                 COUNT(*) AS row_count
@@ -261,19 +281,27 @@ def validate_cumulative_run_ids(
             WHERE
                 target_month = @target_month
         """
-        config = bigquery.QueryJobConfig(
-            query_parameters=[bigquery.ScalarQueryParameter("target_month", "STRING", target_month)]
+        row = next(
+            iter(
+                client.query(
+                    sql,
+                    job_config=month_query_config(target_month),
+                    location=location,
+                ).result()
+            )
         )
-        row = next(iter(client.query(sql, job_config=config, location=location).result()))
-        checks.append((table, int(row.row_count), int(row.run_id_count), str(row.run_id or "")))
-
-    for table, row_count, run_id_count, run_id in checks:
-        if row_count <= 0:
-            raise RuntimeError(f"cumulative source is empty: {table} / {target_month}")
-        if run_id_count != 1 or run_id != expected_run_id:
+        row_count = int(row.row_count)
+        run_id_count = int(row.run_id_count)
+        run_id = str(row.run_id or "")
+        if row_count != expected_count:
+            raise RuntimeError(
+                f"cumulative row count mismatch: table={table}, "
+                f"expected={expected_count}, actual={row_count}"
+            )
+        if row_count > 0 and (run_id_count != 1 or run_id != gate["run_id"]):
             raise RuntimeError(
                 f"cumulative validation run mismatch: table={table}, "
-                f"expected={expected_run_id}, actual={run_id}, distinct={run_id_count}"
+                f"expected={gate['run_id']}, actual={run_id}, distinct={run_id_count}"
             )
 
 
@@ -289,16 +317,19 @@ def load_stage_table(
     target_id = f"{project_id}.{target_dataset}.{target_table}"
     target = client.get_table(target_id)
     stage_id = f"{project_id}.{target_dataset}._stg_prod_publish_{target_table}_{stage_suffix}"
-    job_config = bigquery.LoadJobConfig(
-        schema=target.schema,
-        write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE,
-    )
-    client.load_table_from_dataframe(
-        dataframe,
-        stage_id,
-        job_config=job_config,
-        location=location,
-    ).result()
+    client.delete_table(stage_id, not_found_ok=True)
+    client.create_table(bigquery.Table(stage_id, schema=target.schema))
+    if not dataframe.empty:
+        job_config = bigquery.LoadJobConfig(
+            schema=target.schema,
+            write_disposition=bigquery.WriteDisposition.WRITE_APPEND,
+        )
+        client.load_table_from_dataframe(
+            dataframe,
+            stage_id,
+            job_config=job_config,
+            location=location,
+        ).result()
     return stage_id
 
 
@@ -409,7 +440,6 @@ def write_audit(
         "pod_mismatch_groups_before",
         "error_message",
     ]
-    params = []
     types = {
         "published_at": "TIMESTAMP",
         "target_month": "STRING",
@@ -432,11 +462,17 @@ def write_audit(
         "pod_mismatch_groups_before": "INT64",
         "error_message": "STRING",
     }
-    for name in columns:
-        params.append(bigquery.ScalarQueryParameter(name, types[name], payload.get(name)))
+    params = [
+        bigquery.ScalarQueryParameter(name, types[name], payload.get(name))
+        for name in columns
+    ]
     placeholders = ", ".join(f"@{name}" for name in columns)
     sql = f"INSERT INTO `{table_id}` ({', '.join(columns)}) VALUES ({placeholders})"
-    client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params), location=location).result()
+    client.query(
+        sql,
+        job_config=bigquery.QueryJobConfig(query_parameters=params),
+        location=location,
+    ).result()
 
 
 def main() -> None:
@@ -454,7 +490,7 @@ def main() -> None:
 
     execution_name = os.getenv("CLOUD_RUN_EXECUTION") or os.getenv("K_REVISION") or ""
     audit_payload: dict[str, Any] = {
-        "published_at": None,
+        "published_at": datetime.now(timezone.utc),
         "target_month": args.target_month,
         "validation_github_run_id": None,
         "cumulative_promoted_at": None,
@@ -466,22 +502,22 @@ def main() -> None:
     stage_ids: dict[str, str] = {}
 
     try:
-        run_id, promoted_at = get_promotion_gate(
+        gate = get_promotion_gate(
             source_client,
             args.project_id,
             args.audit_dataset,
             args.source_location,
             args.target_month,
         )
-        audit_payload["validation_github_run_id"] = run_id
-        audit_payload["cumulative_promoted_at"] = promoted_at
-        validate_cumulative_run_ids(
+        audit_payload["validation_github_run_id"] = gate["run_id"]
+        audit_payload["cumulative_promoted_at"] = gate["promoted_at"]
+        validate_cumulative_snapshot(
             source_client,
             args.project_id,
             args.source_dataset,
             args.source_location,
             args.target_month,
-            run_id,
+            gate,
         )
 
         configs = table_configs(args.project_id, args.source_dataset)
@@ -493,8 +529,6 @@ def main() -> None:
                 args.source_location,
                 args.target_month,
             )
-            if dataframe.empty:
-                raise RuntimeError(f"source dataframe is empty: {config.key}")
             dataframes[config.key] = dataframe
             audit_payload[f"source_{config.key}_rows"] = len(dataframe)
 
@@ -567,7 +601,7 @@ def main() -> None:
                     "target_month": args.target_month,
                     "apply": args.apply,
                     "status": status,
-                    "validation_github_run_id": run_id,
+                    "validation_github_run_id": gate["run_id"],
                     "before": {key: value.__dict__ for key, value in comparisons_before.items()},
                     "after": {key: value.__dict__ for key, value in comparisons_after.items()},
                 },
