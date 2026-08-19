@@ -1,4 +1,4 @@
-name: Deploy Production Publish Job
+name: Deploy Cloud Run Job
 
 on:
   push:
