@@ -221,7 +221,7 @@ def _is_empty(dataframe: pd.DataFrame) -> bool:
 
 
 def _clean(value: object) -> str:
-    text = "" if value is None else str(value).replace("\u3000", " ").strip()
+    text = "" if value is None else str(value).strip()
     return "" if text.lower() == "nan" else text
 
 
