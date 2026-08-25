@@ -41,7 +41,10 @@ SELECT
     , NULLIF(TRIM(billing_code), '') AS billing_code
     , NULLIF(TRIM(billing_name), '') AS billing_name
     , NULLIF(TRIM(electronic_publication_code), '') AS electronic_publication_code
-    , NULLIF(TRIM(book_title), '') AS book_title
+    , CASE
+        WHEN TRIM(book_title) = '' THEN NULL
+        ELSE book_title
+    END AS book_title
     , SAFE_CAST(REGEXP_REPLACE(list_price, r'[,￥¥ ]', '') AS NUMERIC) AS list_price
     , NULLIF(TRIM(store_name), '') AS store_name
     , SAFE_CAST(REGEXP_REPLACE(sales_quantity, r'[, ]', '') AS INT64) AS sales_quantity
@@ -103,7 +106,10 @@ SELECT
     , NULLIF(TRIM(s.sales_department_name), '') AS sales_department_name
     , NULLIF(TRIM(s.product_type_code), '') AS product_type_code
     , NULLIF(TRIM(s.product_type_name), '') AS product_type_name
-    , NULLIF(TRIM(s.bibliographic_title), '') AS bibliographic_title
+    , CASE
+        WHEN TRIM(s.bibliographic_title) = '' THEN NULL
+        ELSE s.bibliographic_title
+    END AS bibliographic_title
     , NULLIF(TRIM(s.billing_code), '') AS billing_code
     , NULLIF(TRIM(s.billing_name), '') AS billing_name
     , NULLIF(TRIM(s.ep_statement_code), '') AS ep_statement_code
