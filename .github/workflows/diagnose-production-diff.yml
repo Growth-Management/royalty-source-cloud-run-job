@@ -1,0 +1,124 @@
+name: Deploy Cloud Run Job
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_month:
+        description: "Target month in YYYYMM format"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: royalty-source-production-diff-diagnostic
+  cancel-in-progress: false
+
+env:
+  GCP_PROJECT_ID: ice-qb
+  GAR_LOCATION: asia-northeast1
+  GAR_REPOSITORY: royalty-source
+  IMAGE_NAME: royalty-source-job
+  CLOUD_RUN_JOB: royalty-source-production-diagnose
+  CLOUD_RUN_REGION: asia-northeast1
+  BQ_CUMULATIVE_DATASET: royalty_cumulative
+  BQ_AUDIT_DATASET: royalty_audit
+  PRODUCTION_TARGET_DATASET: ice_qb_source_p1
+  SOURCE_LOCATION: asia-northeast1
+  TARGET_LOCATION: US
+
+jobs:
+  diagnose:
+    name: Diagnose production publish differences
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_DEPLOY_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker auth
+        run: gcloud auth configure-docker "${GAR_LOCATION}-docker.pkg.dev" --quiet
+
+      - name: Validate target month
+        shell: bash
+        env:
+          TARGET_MONTH: ${{ inputs.target_month }}
+        run: |
+          set -euo pipefail
+          if [[ ! "${TARGET_MONTH}" =~ ^[0-9]{6}$ ]]; then
+            echo "target_month must use YYYYMM format" >&2
+            exit 1
+          fi
+          MONTH="${TARGET_MONTH:4:2}"
+          if (( 10#${MONTH} < 1 || 10#${MONTH} > 12 )); then
+            echo "invalid target month: ${TARGET_MONTH}" >&2
+            exit 1
+          fi
+
+      - name: Build and push image
+        shell: bash
+        run: |
+          set -euo pipefail
+          IMAGE_URI="${GAR_LOCATION}-docker.pkg.dev/${GCP_PROJECT_ID}/${GAR_REPOSITORY}/${IMAGE_NAME}:${GITHUB_SHA}"
+          echo "IMAGE_URI=${IMAGE_URI}" >> "${GITHUB_ENV}"
+          docker build --no-cache -t "${IMAGE_URI}" .
+          docker push "${IMAGE_URI}"
+
+      - name: Deploy diagnostic job
+        shell: bash
+        env:
+          TARGET_MONTH: ${{ inputs.target_month }}
+        run: |
+          set -euo pipefail
+          ENV_VARS="GCP_PROJECT_ID=${GCP_PROJECT_ID},BQ_CUMULATIVE_DATASET=${BQ_CUMULATIVE_DATASET},BQ_AUDIT_DATASET=${BQ_AUDIT_DATASET},PRODUCTION_TARGET_DATASET=${PRODUCTION_TARGET_DATASET},SOURCE_LOCATION=${SOURCE_LOCATION},TARGET_LOCATION=${TARGET_LOCATION},JOB_TARGET_MONTH=${TARGET_MONTH}"
+          gcloud run jobs deploy "${CLOUD_RUN_JOB}" \
+            --image "${IMAGE_URI}" \
+            --project "${GCP_PROJECT_ID}" \
+            --region "${CLOUD_RUN_REGION}" \
+            --service-account "${{ vars.CLOUD_RUN_RUNTIME_SERVICE_ACCOUNT }}" \
+            --command python \
+            --args scripts/diagnose_production_diff.py \
+            --set-env-vars "${ENV_VARS}" \
+            --memory 2Gi \
+            --cpu 1 \
+            --task-timeout 1800 \
+            --max-retries 0 \
+            --quiet
+
+      - name: Execute diagnostic job
+        id: execute_diagnostic
+        shell: bash
+        run: |
+          set -euo pipefail
+          EXECUTION_NAME="$(gcloud run jobs execute "${CLOUD_RUN_JOB}" \
+            --project "${GCP_PROJECT_ID}" \
+            --region "${CLOUD_RUN_REGION}" \
+            --wait \
+            --format='value(metadata.name)')"
+          echo "execution_name=${EXECUTION_NAME}" >> "${GITHUB_OUTPUT}"
+          echo "Diagnostic execution: ${EXECUTION_NAME}"
+
+      - name: Write summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "## Production diff diagnostic"
+            echo ""
+            echo "| Item | Value |"
+            echo "|---|---|"
+            echo "| Target month | \`${{ inputs.target_month }}\` |"
+            echo "| Job | \`${CLOUD_RUN_JOB}\` |"
+            echo "| Execution | \`${{ steps.execute_diagnostic.outputs.execution_name }}\` |"
+            echo "| Audit table | \`${GCP_PROJECT_ID}.${BQ_AUDIT_DATASET}.production_publish_diff_log\` |"
+          } >> "${GITHUB_STEP_SUMMARY}"
