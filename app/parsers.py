@@ -100,6 +100,12 @@ FIELD_SPECS: dict[SourceKind, tuple[FieldSpec, ...]] = {
 }
 
 
+PRESERVE_WHITESPACE_FIELDS: dict[SourceKind, frozenset[str]] = {
+    SourceKind.EP_STATEMENT_DETAIL: frozenset({"book_title"}),
+    SourceKind.MONTHLY_PRODUCT_SALES: frozenset({"bibliographic_title"}),
+}
+
+
 class WorkbookParser:
     def __init__(self, max_generic_columns: int = 40):
         self.max_generic_columns = max_generic_columns
@@ -130,7 +136,7 @@ class WorkbookParser:
         for table_index, table in enumerate(document.xpath("//table"), start=1):
             rows: list[list[str]] = []
             for tr in table.xpath(".//tr"):
-                cells = [_clean("".join(cell.itertext())) for cell in tr.xpath("./th|./td")]
+                cells = [_raw_text("".join(cell.itertext())) for cell in tr.xpath("./th|./td")]
                 if cells:
                     rows.append(cells)
             if not rows:
@@ -141,12 +147,13 @@ class WorkbookParser:
         return tables
 
     def _build(self, source_kind: SourceKind, sheet_name: str, dataframe: pd.DataFrame) -> ParsedSheet:
-        normalized = dataframe.where(pd.notna(dataframe), "").map(_clean)
+        raw = dataframe.where(pd.notna(dataframe), "")
+        normalized = raw.map(_clean)
         header_index, column_map, warnings = _detect_header(source_kind, normalized)
         return ParsedSheet(
             sheet_name=sheet_name,
             generic_dataframe=self._generic(normalized),
-            mapped_dataframe=_mapped(source_kind, normalized, header_index, column_map),
+            mapped_dataframe=_mapped(source_kind, raw, header_index, column_map),
             header_row_number=header_index + 1 if header_index >= 0 else None,
             warnings=warnings,
         )
@@ -194,9 +201,12 @@ def _mapped(source_kind: SourceKind, dataframe: pd.DataFrame, header_index: int,
         has_value = False
         for spec in FIELD_SPECS[source_kind]:
             col_index = column_map.get(spec.field_name)
-            value = _clean(row.iloc[col_index]) if col_index is not None and col_index < len(row) else ""
+            if col_index is not None and col_index < len(row):
+                value = _clean_mapped_value(source_kind, spec.field_name, row.iloc[col_index])
+            else:
+                value = ""
             record[spec.field_name] = value
-            has_value = has_value or bool(value)
+            has_value = has_value or bool(_clean(value))
         if has_value:
             records.append(record)
     return pd.DataFrame(records)
@@ -218,6 +228,17 @@ def _decode_html(payload: bytes) -> str:
 
 def _is_empty(dataframe: pd.DataFrame) -> bool:
     return dataframe.empty or not dataframe.where(pd.notna(dataframe), "").map(_clean).map(bool).any().any()
+
+
+def _raw_text(value: object) -> str:
+    text = "" if value is None else str(value)
+    return "" if text.lower() == "nan" else text
+
+
+def _clean_mapped_value(source_kind: SourceKind, field_name: str, value: object) -> str:
+    if field_name in PRESERVE_WHITESPACE_FIELDS.get(source_kind, frozenset()):
+        return _raw_text(value)
+    return _clean(value)
 
 
 def _clean(value: object) -> str:
