@@ -4,7 +4,7 @@
 This job is read-only with respect to the production rows. It loads the validated
 asia-northeast1 cumulative snapshot into temporary US tables, compares each
 column against the existing production month, writes diagnostics into
-royalty_audit.production_publish_diff_log, and deletes the temporary tables.
+royalty_audit production diagnostic tables, and deletes the temporary tables.
 """
 
 from __future__ import annotations
@@ -192,7 +192,27 @@ def ensure_diff_audit_table(client: bigquery.Client) -> str:
     return table_id
 
 
-def write_diff_rows(
+def ensure_title_detail_audit_table(client: bigquery.Client) -> str:
+    table_id = f"{PROJECT_ID}.{AUDIT_DATASET}.production_publish_title_diff_log"
+    sql = f"""
+        CREATE TABLE IF NOT EXISTS `{table_id}` (
+            checked_at TIMESTAMP NOT NULL
+            , target_month STRING NOT NULL
+            , validation_github_run_id STRING NOT NULL
+            , execution_name STRING
+            , table_name STRING NOT NULL
+            , context_json STRING NOT NULL
+            , source_titles_json STRING
+            , target_titles_json STRING
+        )
+        PARTITION BY DATE(checked_at)
+        CLUSTER BY target_month, table_name
+    """
+    client.query(sql, location=SOURCE_LOCATION).result()
+    return table_id
+
+
+def write_rows(
     client: bigquery.Client,
     table_id: str,
     rows: list[dict[str, Any]],
@@ -211,12 +231,112 @@ def write_diff_rows(
     ).result()
 
 
+def collect_title_diff_rows(
+    client: bigquery.Client,
+    stage_id: str,
+    target_id: str,
+    month_column: str,
+    target_month: str,
+    location: str,
+    checked_at: datetime,
+    validation_github_run_id: str,
+    execution_name: str,
+    table_name: str,
+) -> list[dict[str, Any]]:
+    sql = f"""
+        WITH source_grouped AS (
+            SELECT
+                TO_JSON_STRING((SELECT AS STRUCT s.* EXCEPT (title))) AS context_json
+                , title
+                , COUNT(*) AS row_count
+            FROM
+                `{stage_id}` s
+            GROUP BY
+                context_json
+                , title
+        )
+        , target_grouped AS (
+            SELECT
+                TO_JSON_STRING((SELECT AS STRUCT t.* EXCEPT (title))) AS context_json
+                , title
+                , COUNT(*) AS row_count
+            FROM
+                `{target_id}` t
+            WHERE
+                {month_column} = @target_month_int
+            GROUP BY
+                context_json
+                , title
+        )
+        , source_context AS (
+            SELECT
+                context_json
+                , TO_JSON_STRING(
+                    ARRAY_AGG(
+                        STRUCT(title, row_count)
+                        ORDER BY title
+                    )
+                ) AS titles_json
+            FROM
+                source_grouped
+            GROUP BY
+                context_json
+        )
+        , target_context AS (
+            SELECT
+                context_json
+                , TO_JSON_STRING(
+                    ARRAY_AGG(
+                        STRUCT(title, row_count)
+                        ORDER BY title
+                    )
+                ) AS titles_json
+            FROM
+                target_grouped
+            GROUP BY
+                context_json
+        )
+        SELECT
+            COALESCE(s.context_json, t.context_json) AS context_json
+            , s.titles_json AS source_titles_json
+            , t.titles_json AS target_titles_json
+        FROM
+            source_context s
+        FULL OUTER JOIN
+            target_context t
+            USING (context_json)
+        WHERE
+            COALESCE(s.titles_json, '[]') != COALESCE(t.titles_json, '[]')
+        ORDER BY
+            context_json
+    """
+    query_rows = client.query(
+        sql,
+        job_config=int_month_config(target_month),
+        location=location,
+    ).result()
+    return [
+        {
+            "checked_at": checked_at,
+            "target_month": target_month,
+            "validation_github_run_id": validation_github_run_id,
+            "execution_name": execution_name,
+            "table_name": table_name,
+            "context_json": row.context_json,
+            "source_titles_json": row.source_titles_json,
+            "target_titles_json": row.target_titles_json,
+        }
+        for row in query_rows
+    ]
+
+
 def main() -> None:
     validate_target_month(TARGET_MONTH)
 
     source_client = bigquery.Client(project=PROJECT_ID, location=SOURCE_LOCATION)
     target_client = bigquery.Client(project=PROJECT_ID, location=TARGET_LOCATION)
     audit_table = ensure_diff_audit_table(source_client)
+    title_detail_table = ensure_title_detail_audit_table(source_client)
     execution_name = os.getenv("CLOUD_RUN_EXECUTION") or os.getenv("K_REVISION") or ""
 
     gate = get_promotion_gate(
@@ -239,6 +359,7 @@ def main() -> None:
     stage_suffix = f"diag_{TARGET_MONTH}_{uuid.uuid4().hex[:10]}"
     stage_ids: dict[str, str] = {}
     diff_rows: list[dict[str, Any]] = []
+    title_detail_rows: list[dict[str, Any]] = []
     summary: dict[str, Any] = {}
     checked_at = datetime.now(timezone.utc)
 
@@ -275,6 +396,8 @@ def main() -> None:
                 continue
 
             target_schema = target_client.get_table(target_id).schema
+            has_title = any(field.name == "title" for field in target_schema)
+            title_explains_all = False
             for field in target_schema:
                 column_name = field.name
                 value_comparison = compare_column_values(
@@ -322,8 +445,27 @@ def main() -> None:
                     "improvement_groups": improvement,
                     "single_column_explains_all": without_comparison.matched,
                 }
+                if column_name == "title" and without_comparison.matched:
+                    title_explains_all = True
 
-        write_diff_rows(source_client, audit_table, diff_rows)
+            if has_title and title_explains_all:
+                details = collect_title_diff_rows(
+                    target_client,
+                    stage_id,
+                    target_id,
+                    config.month_column,
+                    TARGET_MONTH,
+                    TARGET_LOCATION,
+                    checked_at,
+                    gate["run_id"],
+                    execution_name,
+                    config.key,
+                )
+                title_detail_rows.extend(details)
+                summary[config.key]["title_detail_rows"] = len(details)
+
+        write_rows(source_client, audit_table, diff_rows)
+        write_rows(source_client, title_detail_table, title_detail_rows)
         print(json.dumps(summary, ensure_ascii=False, default=str))
     finally:
         for stage_id in stage_ids.values():
