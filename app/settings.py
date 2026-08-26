@@ -18,6 +18,7 @@ class Settings(BaseModel):
     fail_on_quality_errors: bool = True
     export_output_files: bool = False
     max_generic_columns: int = 40
+    quality_unmatched_tolerance_rate: float = 0.0
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -35,4 +36,5 @@ class Settings(BaseModel):
             fail_on_quality_errors=os.getenv("FAIL_ON_QUALITY_ERRORS", "true").lower() in {"1", "true", "yes", "y"},
             export_output_files=os.getenv("EXPORT_OUTPUT_FILES", "false").lower() in {"1", "true", "yes", "y"},
             max_generic_columns=int(os.getenv("MAX_GENERIC_COLUMNS", "40")),
+            quality_unmatched_tolerance_rate=float(os.getenv("QUALITY_UNMATCHED_TOLERANCE_RATE", "0")),
         )

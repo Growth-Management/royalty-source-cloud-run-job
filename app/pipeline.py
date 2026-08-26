@@ -200,7 +200,10 @@ class SourcePipeline:
     def _run_quality_checks(self, stats: AuditStats) -> None:
         if not stats.target_month:
             raise ValueError("target_month is required before quality checks")
-        replacements = self._sql_replacements(stats.target_month) | {"run_id": stats.run_id}
+        replacements = self._sql_replacements(stats.target_month) | {
+            "run_id": stats.run_id,
+            "tolerance_rate": str(self.settings.quality_unmatched_tolerance_rate),
+        }
         self.bq.run_sql_file(self.base_dir / "sql" / "source_quality_checks.sql", replacements)
         rows = self.bq.run_sql_file(self.base_dir / "sql" / "access_input_quality_checks.sql", replacements)
         stats.source_quality_error_count = int(rows[0]["total_error_count"]) if rows else 0
