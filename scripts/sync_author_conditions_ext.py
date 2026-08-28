@@ -253,6 +253,29 @@ def match_against_salesforce(
     return pd.DataFrame.from_records([dict(row.items()) for row in iterator], columns=columns)
 
 
+# Matches the column order/types build_salesforce_match_sql returns. Loading the
+# "matched" DataFrame without an explicit schema lets pandas' dtype inference decide the
+# relay table's column types; a nullable integer column (revised_rate_sales_quantity)
+# becomes float64 in pandas whenever any row is NULL, which BigQuery then autodetects as
+# FLOAT64 -- and the later INSERT INTO source_author_conditions_ext (INT64 column) fails
+# with "Query column ... has type FLOAT64 which cannot be inserted into column
+# revised_rate_sales_quantity, which has type INT64" (confirmed via a real failed
+# execution on 2026-08-28). An explicit schema avoids the autodetect step entirely.
+RELAY_TABLE_SCHEMA = [
+    bigquery.SchemaField("product_code", "STRING"),
+    bigquery.SchemaField("biblio_contributor_id", "STRING"),
+    bigquery.SchemaField("payee_code", "STRING"),
+    bigquery.SchemaField("author_name", "STRING"),
+    bigquery.SchemaField("payee_name", "STRING"),
+    bigquery.SchemaField("electronic_publication_code", "STRING"),
+    bigquery.SchemaField("revised_royalty_rate", "NUMERIC"),
+    bigquery.SchemaField("initial_royalty_rate", "NUMERIC"),
+    bigquery.SchemaField("revised_rate_sales_quantity", "INT64"),
+    bigquery.SchemaField("revised_rate_sales_amount", "NUMERIC"),
+    bigquery.SchemaField("withholding_tax_type", "STRING"),
+]
+
+
 def load_relay_table(
     client: bigquery.Client,
     matched: pd.DataFrame,
@@ -266,7 +289,23 @@ def load_relay_table(
     client.create_dataset(dataset, exists_ok=True)
 
     table_id = f"{project_id}.{relay_dataset}.{relay_table}"
-    job_config = bigquery.LoadJobConfig(write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE)
+    # Drop and recreate rather than relying on WRITE_TRUNCATE to reconcile schemas: a
+    # load job's write disposition controls the DATA, not the destination schema, so an
+    # existing table with a drifted column type (e.g. left over from a run before this
+    # explicit schema existed) would make the load fail on a type mismatch instead of
+    # fixing itself.
+    client.delete_table(table_id, not_found_ok=True)
+
+    # pandas upcasts an int column with any NULL to float64 (NaN); explicitly using the
+    # nullable Int64 dtype here lets pyarrow cast cleanly into the INT64 schema field
+    # below without tripping on NaN.
+    if "revised_rate_sales_quantity" in matched.columns:
+        matched = matched.astype({"revised_rate_sales_quantity": "Int64"})
+
+    job_config = bigquery.LoadJobConfig(
+        schema=RELAY_TABLE_SCHEMA,
+        write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE,
+    )
     client.load_table_from_dataframe(matched, table_id, job_config=job_config, location=location).result()
     return table_id
 
@@ -304,7 +343,7 @@ def merge_relay_into_ext(
             , r.payee_name
             , r.revised_royalty_rate
             , r.initial_royalty_rate
-            , r.revised_rate_sales_quantity
+            , CAST(r.revised_rate_sales_quantity AS INT64)
             , r.revised_rate_sales_amount
             , r.withholding_tax_type
             , 'sf_auto'
