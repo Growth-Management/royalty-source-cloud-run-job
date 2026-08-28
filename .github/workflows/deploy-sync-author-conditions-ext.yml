@@ -1,0 +1,161 @@
+name: Deploy Sync Author Conditions Ext
+
+on:
+  push:
+    branches:
+      - main
+      - fix/quality-check-samples
+    paths:
+      - scripts/sync_author_conditions_ext.py
+      - Dockerfile
+      - requirements.txt
+      - .github/workflows/deploy-sync-author-conditions-ext.yml
+  workflow_dispatch:
+    inputs:
+      target_month:
+        description: "Target month in YYYYMM format"
+        required: true
+        type: string
+      execute:
+        description: "Execute the sync job after deployment"
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: royalty-source-sync-author-conditions-ext
+  cancel-in-progress: false
+
+env:
+  GCP_PROJECT_ID: ice-qb
+  GAR_LOCATION: asia-northeast1
+  GAR_REPOSITORY: royalty-source
+  IMAGE_NAME: royalty-source-job
+  CLOUD_RUN_JOB: royalty-source-sync-author-conditions-ext
+  CLOUD_RUN_REGION: asia-northeast1
+  BQ_SOURCE_DATASET: royalty_source
+  SOURCE_LOCATION: asia-northeast1
+  SF_DATASET: ice_qb_source
+  SF_LOCATION: US
+  RELAY_DATASET: ice_qb_source_salesforce
+  RELAY_TABLE: author_conditions_ext_candidates
+
+jobs:
+  deploy:
+    name: Build and deploy author conditions ext sync job
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_DEPLOY_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker auth
+        run: gcloud auth configure-docker "${GAR_LOCATION}-docker.pkg.dev" --quiet
+
+      - name: Build and push image
+        shell: bash
+        run: |
+          set -euo pipefail
+          IMAGE_URI="${GAR_LOCATION}-docker.pkg.dev/${GCP_PROJECT_ID}/${GAR_REPOSITORY}/${IMAGE_NAME}:${GITHUB_SHA}"
+          echo "IMAGE_URI=${IMAGE_URI}" >> "${GITHUB_ENV}"
+          docker build --no-cache -t "${IMAGE_URI}" .
+          docker push "${IMAGE_URI}"
+
+      - name: Deploy author conditions ext sync job
+        shell: bash
+        run: |
+          set -euo pipefail
+          ENV_VARS="GCP_PROJECT_ID=${GCP_PROJECT_ID},BQ_SOURCE_DATASET=${BQ_SOURCE_DATASET},SOURCE_LOCATION=${SOURCE_LOCATION},SF_DATASET=${SF_DATASET},SF_LOCATION=${SF_LOCATION},RELAY_DATASET=${RELAY_DATASET},RELAY_TABLE=${RELAY_TABLE}"
+          gcloud run jobs deploy "${CLOUD_RUN_JOB}" \
+            --image "${IMAGE_URI}" \
+            --project "${GCP_PROJECT_ID}" \
+            --region "${CLOUD_RUN_REGION}" \
+            --service-account "royalty-source-ext-loader@${GCP_PROJECT_ID}.iam.gserviceaccount.com" \
+            --command python \
+            --args scripts/sync_author_conditions_ext.py \
+            --set-env-vars "${ENV_VARS}" \
+            --memory 1Gi \
+            --cpu 1 \
+            --task-timeout 900 \
+            --max-retries 0 \
+            --quiet
+
+      - name: Verify deployed sync job
+        shell: bash
+        run: |
+          set -euo pipefail
+          DEPLOYED_IMAGE="$(gcloud run jobs describe "${CLOUD_RUN_JOB}" \
+            --project "${GCP_PROJECT_ID}" \
+            --region "${CLOUD_RUN_REGION}" \
+            --format='value(spec.template.spec.template.spec.containers[0].image)')"
+          echo "Expected image: ${IMAGE_URI}"
+          echo "Deployed image: ${DEPLOYED_IMAGE}"
+          test "${DEPLOYED_IMAGE}" = "${IMAGE_URI}"
+
+      - name: Validate execution inputs
+        if: github.event_name == 'workflow_dispatch' && inputs.execute
+        shell: bash
+        env:
+          TARGET_MONTH: ${{ inputs.target_month }}
+        run: |
+          set -euo pipefail
+          if [[ ! "${TARGET_MONTH}" =~ ^[0-9]{6}$ ]]; then
+            echo "target_month must use YYYYMM format" >&2
+            exit 1
+          fi
+          MONTH="${TARGET_MONTH:4:2}"
+          if (( 10#${MONTH} < 1 || 10#${MONTH} > 12 )); then
+            echo "invalid target month: ${TARGET_MONTH}" >&2
+            exit 1
+          fi
+
+      - name: Execute sync job
+        if: github.event_name == 'workflow_dispatch' && inputs.execute
+        id: execute_sync
+        shell: bash
+        env:
+          TARGET_MONTH: ${{ inputs.target_month }}
+        run: |
+          set -euo pipefail
+          gcloud run jobs update "${CLOUD_RUN_JOB}" \
+            --project "${GCP_PROJECT_ID}" \
+            --region "${CLOUD_RUN_REGION}" \
+            --update-env-vars "JOB_TARGET_MONTH=${TARGET_MONTH}" \
+            --quiet
+          EXECUTION_NAME="$(gcloud run jobs execute "${CLOUD_RUN_JOB}" \
+            --project "${GCP_PROJECT_ID}" \
+            --region "${CLOUD_RUN_REGION}" \
+            --wait \
+            --format='value(metadata.name)')"
+          echo "execution_name=${EXECUTION_NAME}" >> "${GITHUB_OUTPUT}"
+          echo "Sync execution: ${EXECUTION_NAME}"
+
+      - name: Write summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "## Author conditions ext sync job"
+            echo ""
+            echo "| Item | Value |"
+            echo "|---|---|"
+            echo "| Image | \`${IMAGE_URI}\` |"
+            echo "| Job | \`${CLOUD_RUN_JOB}\` |"
+            if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+              echo "| Target month | \`${{ inputs.target_month }}\` |"
+              echo "| Execute | \`${{ inputs.execute }}\` |"
+              echo "| Execution | \`${{ steps.execute_sync.outputs.execution_name }}\` |"
+            fi
+          } >> "${GITHUB_STEP_SUMMARY}"

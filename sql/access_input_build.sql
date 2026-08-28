@@ -55,6 +55,39 @@ WITH current_author_lookup AS (
         ORDER BY row_number
     ) = 1
 )
+, ext_author_lookup AS (
+    SELECT
+        CONCAT('01-', product_code) AS product_key
+        , electronic_publication_code
+    FROM
+        `{{ project_id }}.{{ source_dataset }}.source_author_conditions_ext`
+    WHERE
+        product_code IS NOT NULL
+        AND electronic_publication_code IS NOT NULL
+    QUALIFY ROW_NUMBER() OVER (
+        PARTITION BY CONCAT('01-', product_code)
+        ORDER BY added_at DESC
+    ) = 1
+)
+, current_and_ext_author_lookup AS (
+    -- source_author_conditions is frozen (Excel-origin, unmaintained since 2026-07-22);
+    -- source_author_conditions_ext holds product_code mappings added after the freeze and
+    -- wins on conflict so a newly added row can override a stale/missing frozen entry.
+    SELECT
+        product_key
+        , electronic_publication_code
+    FROM (
+        SELECT product_key, electronic_publication_code, 1 AS priority FROM ext_author_lookup
+
+        UNION ALL
+
+        SELECT product_key, electronic_publication_code, 0 AS priority FROM current_author_lookup
+    )
+    QUALIFY ROW_NUMBER() OVER (
+        PARTITION BY product_key
+        ORDER BY priority DESC
+    ) = 1
+)
 , author_lookup AS (
     SELECT
         product_key
@@ -70,7 +103,7 @@ WITH current_author_lookup AS (
         product_key
         , electronic_publication_code
     FROM
-        current_author_lookup
+        current_and_ext_author_lookup
     WHERE
         v_accounting_month != '202602'
 )
@@ -148,6 +181,39 @@ WITH current_author_lookup AS (
         ORDER BY row_number
     ) = 1
 )
+, ext_author_lookup AS (
+    SELECT
+        CONCAT('01-', product_code) AS product_key
+        , electronic_publication_code
+    FROM
+        `{{ project_id }}.{{ source_dataset }}.source_author_conditions_ext`
+    WHERE
+        product_code IS NOT NULL
+        AND electronic_publication_code IS NOT NULL
+    QUALIFY ROW_NUMBER() OVER (
+        PARTITION BY CONCAT('01-', product_code)
+        ORDER BY added_at DESC
+    ) = 1
+)
+, current_and_ext_author_lookup AS (
+    -- source_author_conditions is frozen (Excel-origin, unmaintained since 2026-07-22);
+    -- source_author_conditions_ext holds product_code mappings added after the freeze and
+    -- wins on conflict so a newly added row can override a stale/missing frozen entry.
+    SELECT
+        product_key
+        , electronic_publication_code
+    FROM (
+        SELECT product_key, electronic_publication_code, 1 AS priority FROM ext_author_lookup
+
+        UNION ALL
+
+        SELECT product_key, electronic_publication_code, 0 AS priority FROM current_author_lookup
+    )
+    QUALIFY ROW_NUMBER() OVER (
+        PARTITION BY product_key
+        ORDER BY priority DESC
+    ) = 1
+)
 , author_lookup AS (
     SELECT
         product_key
@@ -163,7 +229,7 @@ WITH current_author_lookup AS (
         product_key
         , electronic_publication_code
     FROM
-        current_author_lookup
+        current_and_ext_author_lookup
     WHERE
         v_accounting_month != '202602'
 )
