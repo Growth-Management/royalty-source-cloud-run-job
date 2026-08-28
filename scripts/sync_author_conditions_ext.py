@@ -53,9 +53,17 @@ FIELD NAME STATUS (updated 2026-08-28 from independent BigQuery verification):
       same value there) and royalty_condition_quantity_1__c /
       royalty_condition_amount_1__c (the revised-rate threshold, used below for
       revised_rate_sales_quantity / revised_rate_sales_amount).
-    - royalty_condition_quantity_1__c sometimes holds the literal value 9999999, which
-      is very likely a "no threshold" sentinel rather than a real quantity; mapped to
-      NULL via NULLIF below rather than copied verbatim.
+    - royalty_rate_1__c / royalty_rate_2__c / royalty_condition_quantity_1__c /
+      royalty_condition_amount_1__c are all STRING columns on sf_BiblioContributor__c
+      (confirmed 2026-08-28 -- this Salesforce mirror stores every column as STRING),
+      and the quantity/amount columns contain non-integer string forms in real data
+      (e.g. "9999999.0", "9.99999999E8"). build_salesforce_match_sql SAFE_CASTs all four
+      to NUMERIC before use; SAFE_CAST(... AS INT64) directly would fail to parse those
+      forms.
+    - "No revised-rate threshold" is not a single sentinel value: real data confirmed
+      three values used for this (9999999, 99999999, 999999999; 999999999 is the most
+      common). Treated as a floor (>= SALESFORCE_NO_THRESHOLD_SENTINEL means "no
+      threshold" -> NULL) rather than an exact match on any one of them.
   - Whether `ice_qb_source_salesforce` is a dataset (confirmed: yes, dataset).
 
 source_author_conditions_ext's logical key is (product_code, payee_code), not
@@ -83,36 +91,75 @@ from google.cloud import bigquery
 
 DEFAULT_ADDED_BY = "sync_author_conditions_ext"
 
-# royalty_condition_quantity_1__c uses this value to mean "no revised-rate threshold",
-# not a literal quantity (confirmed against real data on 2026-08-28); mapped to NULL.
+# royalty_rate_1__c / royalty_rate_2__c / royalty_condition_quantity_1__c /
+# royalty_condition_amount_1__c on sf_BiblioContributor__c are all STRING columns (the
+# Salesforce mirror stores every column as STRING), so they must be SAFE_CAST to NUMERIC
+# before any numeric comparison -- comparing a STRING column directly against an INT64
+# literal fails in BigQuery ("No matching signature for function NULLIF"). The quantity
+# and amount columns also contain non-integer string forms in real data (e.g. "9999999.0",
+# "9.99999999E8"), which SAFE_CAST(... AS INT64) cannot parse but SAFE_CAST(... AS NUMERIC)
+# can.
+#
+# "No revised-rate threshold" is not a single sentinel value: real data confirmed three
+# values used for this on 2026-08-28 -- 9999999, 99999999, and 999999999 (999999999 is the
+# most common of the three). Rather than listing all three, this is treated as a floor:
+# any parsed value >= SALESFORCE_NO_THRESHOLD_SENTINEL is "no threshold" and mapped to
+# NULL, not just an exact match on 9999999 itself.
 SALESFORCE_NO_THRESHOLD_SENTINEL = 9999999
 
 
 def build_salesforce_match_sql(project_id: str, sf_dataset: str) -> str:
     return f"""
+        WITH matched AS (
+            SELECT
+                b.product_code__c AS product_code
+                , bc.Id AS biblio_contributor_id
+                , bc.payee_code__c AS payee_code
+                , bc.contributor_name__c AS author_name
+                , bc.contributor_name__c AS payee_name
+                , b.e_publishing_code__c AS electronic_publication_code
+                , SAFE_CAST(bc.royalty_rate_2__c AS NUMERIC) AS revised_royalty_rate
+                , SAFE_CAST(bc.royalty_rate_1__c AS NUMERIC) AS initial_royalty_rate
+                , SAFE_CAST(bc.royalty_condition_quantity_1__c AS NUMERIC) AS raw_revised_rate_sales_quantity
+                , SAFE_CAST(bc.royalty_condition_amount_1__c AS NUMERIC) AS raw_revised_rate_sales_amount
+                , bc.tax_withholding_type__c AS withholding_tax_type
+                , bc.LastModifiedDate AS last_modified_date
+            FROM
+                `{project_id}.{sf_dataset}.sf_Biblio__c` b
+            INNER JOIN
+                `{project_id}.{sf_dataset}.sf_BiblioContributor__c` bc
+                ON bc.Biblio__c = b.Id
+            WHERE
+                b.product_code__c IN UNNEST(@product_codes)
+                AND bc.payee_code__c IS NOT NULL
+        )
         SELECT
-            b.product_code__c AS product_code
-            , bc.Id AS biblio_contributor_id
-            , bc.payee_code__c AS payee_code
-            , bc.contributor_name__c AS author_name
-            , bc.contributor_name__c AS payee_name
-            , b.e_publishing_code__c AS electronic_publication_code
-            , bc.royalty_rate_2__c AS revised_royalty_rate
-            , bc.royalty_rate_1__c AS initial_royalty_rate
-            , NULLIF(bc.royalty_condition_quantity_1__c, {SALESFORCE_NO_THRESHOLD_SENTINEL}) AS revised_rate_sales_quantity
-            , NULLIF(bc.royalty_condition_amount_1__c, {SALESFORCE_NO_THRESHOLD_SENTINEL}) AS revised_rate_sales_amount
-            , bc.tax_withholding_type__c AS withholding_tax_type
+            product_code
+            , biblio_contributor_id
+            , payee_code
+            , author_name
+            , payee_name
+            , electronic_publication_code
+            , revised_royalty_rate
+            , initial_royalty_rate
+            , CASE
+                WHEN raw_revised_rate_sales_quantity IS NULL
+                    OR raw_revised_rate_sales_quantity >= {SALESFORCE_NO_THRESHOLD_SENTINEL}
+                    THEN NULL
+                ELSE SAFE_CAST(raw_revised_rate_sales_quantity AS INT64)
+            END AS revised_rate_sales_quantity
+            , CASE
+                WHEN raw_revised_rate_sales_amount IS NULL
+                    OR raw_revised_rate_sales_amount >= {SALESFORCE_NO_THRESHOLD_SENTINEL}
+                    THEN NULL
+                ELSE raw_revised_rate_sales_amount
+            END AS revised_rate_sales_amount
+            , withholding_tax_type
         FROM
-            `{project_id}.{sf_dataset}.sf_Biblio__c` b
-        INNER JOIN
-            `{project_id}.{sf_dataset}.sf_BiblioContributor__c` bc
-            ON bc.Biblio__c = b.Id
-        WHERE
-            b.product_code__c IN UNNEST(@product_codes)
-            AND bc.payee_code__c IS NOT NULL
+            matched
         QUALIFY ROW_NUMBER() OVER (
-            PARTITION BY b.product_code__c, bc.payee_code__c
-            ORDER BY bc.LastModifiedDate DESC
+            PARTITION BY product_code, payee_code
+            ORDER BY last_modified_date DESC
         ) = 1
     """
 
