@@ -1,3 +1,5 @@
+# Unit tests only. No GCP authentication, no deploy, no BigQuery access.
+# Outbound network: GitHub Actions runners and PyPI (pip install -r requirements.txt).
 name: Test source diff worker
 
 on:
@@ -6,6 +8,7 @@ on:
       - "app/source_diff_worker.py"
       - "scripts/publish_to_ice_qb_source_p1.py"
       - "tests/**"
+      - "requirements.txt"
       - ".github/workflows/test-source-diff-worker.yml"
   push:
     branches:
@@ -14,6 +17,7 @@ on:
       - "app/source_diff_worker.py"
       - "scripts/publish_to_ice_qb_source_p1.py"
       - "tests/**"
+      - "requirements.txt"
       - ".github/workflows/test-source-diff-worker.yml"
 
 permissions:
@@ -26,9 +30,18 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          # Matches the Dockerfile base image (python:3.11-slim).
+          python-version: "3.11"
+          cache: pip
+      - name: Install runtime dependencies
+        # The publisher tests import pandas / google-cloud-bigquery (BigQuery itself is mocked).
+        run: pip install -r requirements.txt
       - name: Compile changed Python
         run: |
-          python -m py_compile             app/source_diff_worker.py             scripts/publish_to_ice_qb_source_p1.py             tests/test_source_diff_worker.py
+          python -m py_compile \
+            app/source_diff_worker.py \
+            scripts/publish_to_ice_qb_source_p1.py \
+            tests/test_source_diff_worker.py \
+            tests/test_publish_to_ice_qb_source_p1.py
       - name: Run unit tests
-        run: python -m unittest discover -s tests -p "test_source_diff_worker.py"
+        run: python -m unittest discover -s tests -p "test_*.py" -v
