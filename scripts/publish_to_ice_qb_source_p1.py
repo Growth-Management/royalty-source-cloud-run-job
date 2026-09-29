@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -20,6 +21,26 @@ from typing import Any
 import pandas as pd
 from google.cloud import bigquery
 
+# Cloud Run runs this file as `python scripts/publish_to_ice_qb_source_p1.py`, which puts
+# scripts/ (not the repository root) on sys.path. Add the root so `app` is importable.
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
+from app.source_diff_worker import (  # noqa: E402
+    DiffSummary,
+    compare_stage_to_target,
+    ensure_delete_candidates_safe,
+)
+
+TABLE_KEYS = ("sales", "store", "pod")
+# Diff audit columns added in Phase 1. Kept nullable so existing audit rows stay valid.
+DIFF_AUDIT_COLUMNS = tuple(
+    f"{key}_{metric}_rows_before"
+    for metric in ("unchanged", "insert", "delete_candidate")
+    for key in TABLE_KEYS
+)
+
 
 @dataclass(frozen=True)
 class TableConfig:
@@ -27,24 +48,6 @@ class TableConfig:
     target_table: str
     month_column: str
     source_sql: str
-
-
-@dataclass(frozen=True)
-class Comparison:
-    source_rows: int
-    target_rows: int
-    mismatch_groups: int
-    source_only_rows: int
-    target_only_rows: int
-
-    @property
-    def matched(self) -> bool:
-        return (
-            self.source_rows == self.target_rows
-            and self.mismatch_groups == 0
-            and self.source_only_rows == 0
-            and self.target_only_rows == 0
-        )
 
 
 def parse_args() -> argparse.Namespace:
@@ -213,7 +216,35 @@ def ensure_audit_table(
         CLUSTER BY target_month, status
     """
     client.query(sql, location=location).result()
+    existing_columns = {schema_field.name for schema_field in client.get_table(table_id).schema}
+    alter_sql = build_add_diff_columns_sql(table_id, existing_columns)
+    if alter_sql:
+        # One DDL statement only when columns are missing, to stay well within
+        # BigQuery's per-table metadata update rate limits.
+        client.query(alter_sql, location=location).result()
     return table_id
+
+
+def build_add_diff_columns_sql(table_id: str, existing_columns: set[str]) -> str | None:
+    missing = [name for name in DIFF_AUDIT_COLUMNS if name not in existing_columns]
+    if not missing:
+        return None
+    clauses = ", ".join(f"ADD COLUMN IF NOT EXISTS {name} INT64" for name in missing)
+    return f"ALTER TABLE `{table_id}` {clauses}"
+
+
+def decide_publish_status(comparisons: dict[str, DiffSummary], apply: bool) -> str:
+    """Return ALREADY_MATCHED, DRY_RUN_MISMATCH, or APPLY.
+
+    The DELETE_CANDIDATE gate only fires when apply is requested; dry-run always
+    completes so the counts can be reviewed. No override is reachable from here.
+    """
+    if all(comparison.matched for comparison in comparisons.values()):
+        return "ALREADY_MATCHED"
+    if not apply:
+        return "DRY_RUN_MISMATCH"
+    ensure_delete_candidates_safe(comparisons)
+    return "APPLY"
 
 
 def get_promotion_gate(
@@ -333,58 +364,34 @@ def load_stage_table(
     return stage_id
 
 
-def compare_stage_to_target(
+def ensure_stage_within_target_month(
     client: bigquery.Client,
     stage_id: str,
-    target_id: str,
     month_column: str,
     target_month: str,
     location: str,
-) -> Comparison:
-    sql = f"""
-        WITH source_grouped AS (
-            SELECT
-                TO_JSON_STRING(s) AS row_json
-                , COUNT(*) AS row_count
-            FROM
-                `{stage_id}` s
-            GROUP BY
-                row_json
-        )
-        , target_grouped AS (
-            SELECT
-                TO_JSON_STRING(t) AS row_json
-                , COUNT(*) AS row_count
-            FROM
-                `{target_id}` t
-            WHERE
-                {month_column} = @target_month_int
-            GROUP BY
-                row_json
-        )
-        SELECT
-            (SELECT COUNT(*) FROM `{stage_id}`) AS source_rows
-            , (SELECT COUNT(*) FROM `{target_id}` WHERE {month_column} = @target_month_int) AS target_rows
-            , COUNTIF(COALESCE(s.row_count, 0) != COALESCE(t.row_count, 0)) AS mismatch_groups
-            , COALESCE(SUM(GREATEST(COALESCE(s.row_count, 0) - COALESCE(t.row_count, 0), 0)), 0) AS source_only_rows
-            , COALESCE(SUM(GREATEST(COALESCE(t.row_count, 0) - COALESCE(s.row_count, 0), 0)), 0) AS target_only_rows
-        FROM
-            source_grouped s
-        FULL OUTER JOIN
-            target_grouped t
-            USING (row_json)
+) -> None:
+    """Block apply if the stage holds rows outside the target month.
+
+    apply_transaction deletes only the target month but inserts every stage row, so an
+    out-of-month stage row would change another month in production.
     """
-    config = bigquery.QueryJobConfig(
+    sql = f"""
+        SELECT
+            COUNTIF({month_column} IS NULL OR {month_column} != @target_month_int) AS out_of_month_rows
+        FROM
+            `{stage_id}`
+    """
+    job_config = bigquery.QueryJobConfig(
         query_parameters=[bigquery.ScalarQueryParameter("target_month_int", "INT64", int(target_month))]
     )
-    row = next(iter(client.query(sql, job_config=config, location=location).result()))
-    return Comparison(
-        source_rows=int(row.source_rows),
-        target_rows=int(row.target_rows),
-        mismatch_groups=int(row.mismatch_groups),
-        source_only_rows=int(row.source_only_rows),
-        target_only_rows=int(row.target_only_rows),
-    )
+    row = next(iter(client.query(sql, job_config=job_config, location=location).result()))
+    out_of_month_rows = int(row.out_of_month_rows or 0)
+    if out_of_month_rows:
+        raise RuntimeError(
+            f"stage contains rows outside target month; apply is blocked: "
+            f"stage={stage_id}, {month_column}!={target_month} rows={out_of_month_rows}"
+        )
 
 
 def apply_transaction(
@@ -438,6 +445,7 @@ def write_audit(
         "sales_mismatch_groups_before",
         "store_mismatch_groups_before",
         "pod_mismatch_groups_before",
+        *DIFF_AUDIT_COLUMNS,
         "error_message",
     ]
     types = {
@@ -460,6 +468,7 @@ def write_audit(
         "sales_mismatch_groups_before": "INT64",
         "store_mismatch_groups_before": "INT64",
         "pod_mismatch_groups_before": "INT64",
+        **{name: "INT64" for name in DIFF_AUDIT_COLUMNS},
         "error_message": "STRING",
     }
     params = [
@@ -533,7 +542,7 @@ def main() -> None:
             audit_payload[f"source_{config.key}_rows"] = len(dataframe)
 
         stage_suffix = f"{args.target_month}_{uuid.uuid4().hex[:12]}"
-        comparisons_before: dict[str, Comparison] = {}
+        comparisons_before: dict[str, DiffSummary] = {}
         for config in configs:
             stage_id = load_stage_table(
                 target_client,
@@ -557,13 +566,20 @@ def main() -> None:
             comparisons_before[config.key] = comparison
             audit_payload[f"target_before_{config.key}_rows"] = comparison.target_rows
             audit_payload[f"{config.key}_mismatch_groups_before"] = comparison.mismatch_groups
+            audit_payload[f"{config.key}_unchanged_rows_before"] = comparison.unchanged_rows
+            audit_payload[f"{config.key}_insert_rows_before"] = comparison.insert_rows
+            audit_payload[f"{config.key}_delete_candidate_rows_before"] = comparison.delete_candidate_rows
 
-        all_matched = all(comparison.matched for comparison in comparisons_before.values())
-        if all_matched:
-            status = "ALREADY_MATCHED"
-        elif not args.apply:
-            status = "DRY_RUN_MISMATCH"
-        else:
+        status = decide_publish_status(comparisons_before, args.apply)
+        if status == "APPLY":
+            for config in configs:
+                ensure_stage_within_target_month(
+                    target_client,
+                    stage_ids[config.key],
+                    config.month_column,
+                    args.target_month,
+                    args.target_location,
+                )
             apply_transaction(
                 target_client,
                 args.project_id,
@@ -575,7 +591,7 @@ def main() -> None:
             )
             status = "SUCCESS"
 
-        comparisons_after: dict[str, Comparison] = {}
+        comparisons_after: dict[str, DiffSummary] = {}
         for config in configs:
             target_id = f"{args.project_id}.{args.target_dataset}.{config.target_table}"
             comparison = compare_stage_to_target(
@@ -602,8 +618,8 @@ def main() -> None:
                     "apply": args.apply,
                     "status": status,
                     "validation_github_run_id": gate["run_id"],
-                    "before": {key: value.__dict__ for key, value in comparisons_before.items()},
-                    "after": {key: value.__dict__ for key, value in comparisons_after.items()},
+                    "before": {key: value.as_dict() for key, value in comparisons_before.items()},
+                    "after": {key: value.as_dict() for key, value in comparisons_after.items()},
                 },
                 ensure_ascii=False,
                 default=str,
