@@ -100,10 +100,17 @@ publisher がそこから読み込む形にする（Phase 1 では未実装）�
 検出条件:
 
 ```text
-過去月 royalty_cumulative.sales で electronic_publication_code = '#N/A'
-  AND 現在の source_product_master に product_code がある
-  AND 現在の source_author_conditions または source_author_conditions_ext に著者条件がある
+過去月 ice_qb_source_p1.wholesale_sales_report で digital_pub_code = '#N/A'
+  AND 現在の ice_qb_source_p1.catalog_bibliographic_master に product_code がある
+  AND 現在の ice_qb_source_p1.author_condition_list に著者条件がある
 ```
+
+`royalty_cumulative` は新パイプラインで累積投入済みの月しか保持しないため、過去月監視の基準には使用しない。
+また `royalty_source.source_* / source_author_conditions_ext` は新パイプライン側の加工・拡張データであり、
+「本番で確定した過去月データが、現在の正式マスタなら計算可能か」を判定する本監視の基準にはしない。
+
+2026-09-29 の read-only 実データ検証では、202603〜202607 について既知の 202604 2商品
+(`2325411768`, `2325411784`) のみが候補となることを確認した。
 
 監視 SQL（読み取り専用）: `sql/audit/retroactive_master_update_candidates.sql`
 
