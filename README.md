@@ -229,24 +229,24 @@ Cloud Run Job のサービスアカウントには、Drive読み取り、将来�
 
 ## Phase 1 monthly SOURCE diff worker
 
-Production publication now uses `app/source_diff_worker.py` as the common comparison layer.
+本番反映 (`scripts/publish_to_ice_qb_source_p1.py`) は `app/source_diff_worker.py` を共通の比較層として使う。
 
-The initial diff policy is deliberately conservative:
+- 完全行の multiset 比較を正とする（`wholesale_sales_report` は業務キーに正当な重複があるため UPDATE キーを推測しない）
+- 分類: `UNCHANGED` / `INSERT` / `DELETE_CANDIDATE` / `UPDATE`（Phase 1 では常に 0）
+- `apply=true` で `DELETE_CANDIDATE > 0` のときは適用前に停止する。dry-run は停止せず件数を記録する
+- `apply=true` のとき stage 全行が対象月であることを確認してから適用する
+- 既存の transaction / post-apply verification / 一時 stage cleanup は維持
+- 差分件数（unchanged / insert / delete_candidate）を `royalty_audit.production_publish_log` に sales / store / pod 別に記録する
+- 通常運用経路に DELETE_CANDIDATE の override は無い
 
-- exact-row multiset comparison is the canonical baseline,
-- `UNCHANGED` and `INSERT` are counted directly,
-- production-only rows are classified as `DELETE_CANDIDATE`,
-- `UPDATE` remains disabled until a stable unique business key is verified for each source kind,
-- apply is blocked when any `DELETE_CANDIDATE` exists.
-
-This avoids guessing a row key for `wholesale_sales_report`, where real monthly data contains legitimate duplicate business-key groups. The existing production-publish transaction and post-apply verification remain unchanged.
-
-The diff counts are recorded in `royalty_audit.production_publish_log` for sales, store, and POD.
-
-Pure unit tests:
+テスト（GCP 認証不要、BigQuery はモック）:
 
 ```bash
-python -m unittest discover -s tests -p "test_source_diff_worker.py"
+python -m unittest discover -s tests -p "test_*.py"
 ```
 
-Design notes: `docs/source_diff_worker_phase1.md`.
+- 設計: `docs/source_diff_worker_phase1.md`
+- 202608 Shadow Run 手順: `docs/runbook_shadow_run_202608.md`
+- 遡及マスタ更新候補の監視 SQL（読み取り専用）: `sql/audit/retroactive_master_update_candidates.sql`
+
+注意: `fix/quality-check-samples` への push（PR マージ含む）で production publish Job と `royalty-source-job` が自動 deploy される。
