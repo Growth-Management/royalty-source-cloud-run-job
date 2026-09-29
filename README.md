@@ -225,3 +225,28 @@ Cloud Run Job のサービスアカウントには、Drive読み取り、将来�
 4. `app/drive_client.py` に加工データDriveへのアップロード処理を追加する
 5. Access結果との月次差分検証を自動化する
 6. SOURCE品質チェックの閾値を実運用基準に合わせる
+
+
+## Phase 1 monthly SOURCE diff worker
+
+Production publication now uses `app/source_diff_worker.py` as the common comparison layer.
+
+The initial diff policy is deliberately conservative:
+
+- exact-row multiset comparison is the canonical baseline,
+- `UNCHANGED` and `INSERT` are counted directly,
+- production-only rows are classified as `DELETE_CANDIDATE`,
+- `UPDATE` remains disabled until a stable unique business key is verified for each source kind,
+- apply is blocked when any `DELETE_CANDIDATE` exists.
+
+This avoids guessing a row key for `wholesale_sales_report`, where real monthly data contains legitimate duplicate business-key groups. The existing production-publish transaction and post-apply verification remain unchanged.
+
+The diff counts are recorded in `royalty_audit.production_publish_log` for sales, store, and POD.
+
+Pure unit tests:
+
+```bash
+python -m unittest discover -s tests -p "test_source_diff_worker.py"
+```
+
+Design notes: `docs/source_diff_worker_phase1.md`.
