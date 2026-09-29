@@ -1,82 +1,59 @@
 -- RETROACTIVE_MASTER_UPDATE candidate monitor (READ-ONLY).
 --
--- Lists past-month wholesale rows that were published with
--- electronic_publication_code = '#N/A' because the author condition was missing at
--- monthly-processing time, but whose product now has BOTH a product master row and an
--- author condition (frozen source_author_conditions or source_author_conditions_ext).
+-- Lists past-month production wholesale rows whose digital_pub_code was '#N/A'
+-- at monthly-processing time, but whose product now has BOTH:
+--   1. a row in the current production catalog master, and
+--   2. one or more rows in the current production author-condition master.
+--
+-- The monitoring baseline is ice_qb_source_p1, not royalty_cumulative/royalty_source.
+-- royalty_cumulative only contains months promoted through the new pipeline and therefore
+-- is not a complete historical source for this check. The current production masters are
+-- the approved source of truth for the "can this row be calculated now?" question.
 --
 -- This query only reports candidates. It does not correct anything and must not be turned
--- into an INSERT/UPDATE against royalty_cumulative, ice_qb_source_p1, or any correction
+-- into an INSERT/UPDATE against ice_qb_source_p1, royalty_cumulative, or any correction
 -- table. Correction is an operator decision (see docs/source_diff_worker_phase1.md).
 --
--- Not executed by app/pipeline.py. Run manually with the placeholders replaced, e.g.
---   project_id=ice-qb, cumulative_dataset=royalty_cumulative, source_dataset=royalty_source,
+-- Not executed by app/pipeline.py. Run manually with placeholders replaced, e.g.
+--   project_id=ice-qb, production_dataset=ice_qb_source_p1,
 --   from_month=202603, to_month=202607.
--- All referenced datasets are in asia-northeast1 (ice_qb_source_p1 in US is not joined).
+-- All referenced tables are in the production dataset (US).
 --
 -- Known case (verified during migration): 202604 product_code 2325411768 / 2325411784,
 -- author conditions registered 5/18-5/19, Access re-export added 22,712 JPY.
 
 WITH na_rows AS (
     SELECT
-        target_month
+        CAST(year_month AS STRING) AS target_month
         , product_code
         , COUNT(*) AS na_row_count
-        , SUM(SAFE_CAST(sales_quantity_1 AS NUMERIC)) AS sales_quantity
-        , SUM(SAFE_CAST(sales_amount_1 AS NUMERIC)) AS license_fee
+        , SUM(COALESCE(dl_quantity, 0)) AS dl_quantity
+        , SUM(COALESCE(license_fee, 0)) AS license_fee
     FROM
-        `{{ project_id }}.{{ cumulative_dataset }}.sales`
+        `{{ project_id }}.{{ production_dataset }}.wholesale_sales_report`
     WHERE
-        target_month BETWEEN '{{ from_month }}' AND '{{ to_month }}'
-        AND electronic_publication_code = '#N/A'
-    GROUP BY
-        target_month
-        , product_code
+        year_month BETWEEN CAST('{{ from_month }}' AS INT64) AND CAST('{{ to_month }}' AS INT64)
+        AND digital_pub_code = '#N/A'
+    GROUP BY ALL
 )
 , current_product_master AS (
     SELECT DISTINCT
         product_code
     FROM
-        `{{ project_id }}.{{ source_dataset }}.source_product_master`
+        `{{ project_id }}.{{ production_dataset }}.catalog_bibliographic_master`
     WHERE
         product_code IS NOT NULL
-)
-, current_author_conditions AS (
-    SELECT
-        product_code
-        , 'source_author_conditions' AS condition_source
-        , payee_code
-        , electronic_publication_code
-        , CAST(NULL AS TIMESTAMP) AS added_at
-    FROM
-        `{{ project_id }}.{{ source_dataset }}.source_author_conditions`
-    WHERE
-        product_code IS NOT NULL
-        AND electronic_publication_code IS NOT NULL
-
-    UNION ALL
-
-    SELECT
-        product_code
-        , CONCAT('source_author_conditions_ext:', source_type) AS condition_source
-        , payee_code
-        , electronic_publication_code
-        , added_at
-    FROM
-        `{{ project_id }}.{{ source_dataset }}.source_author_conditions_ext`
-    WHERE
-        product_code IS NOT NULL
-        AND electronic_publication_code IS NOT NULL
 )
 , author_condition_summary AS (
     SELECT
         product_code
-        , COUNT(DISTINCT payee_code) AS payee_count
-        , STRING_AGG(DISTINCT condition_source, ', ') AS condition_sources
-        , STRING_AGG(DISTINCT electronic_publication_code, ', ') AS current_electronic_publication_codes
-        , MIN(added_at) AS first_ext_added_at
+        , COUNT(*) AS author_condition_rows
+        , COUNTIF(payee_code IS NOT NULL AND TRIM(payee_code) != '') AS payee_rows
+        , STRING_AGG(DISTINCT digital_pub_code, ', ') AS current_digital_pub_codes
     FROM
-        current_author_conditions
+        `{{ project_id }}.{{ production_dataset }}.author_condition_list`
+    WHERE
+        product_code IS NOT NULL
     GROUP BY
         product_code
 )
@@ -85,12 +62,11 @@ SELECT
     , n.target_month
     , n.product_code
     , n.na_row_count
-    , n.sales_quantity
+    , n.dl_quantity
     , n.license_fee
-    , a.payee_count
-    , a.condition_sources
-    , a.current_electronic_publication_codes
-    , a.first_ext_added_at
+    , a.author_condition_rows
+    , a.payee_rows
+    , a.current_digital_pub_codes
 FROM
     na_rows n
 INNER JOIN
@@ -99,6 +75,8 @@ INNER JOIN
 INNER JOIN
     author_condition_summary a
     USING (product_code)
+WHERE
+    a.author_condition_rows > 0
 ORDER BY
     n.target_month
     , n.product_code
