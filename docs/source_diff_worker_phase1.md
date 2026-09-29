@@ -44,3 +44,20 @@ Run the pure unit tests without GCP credentials:
 ```bash
 python -m unittest discover -s tests -p "test_*.py"
 ```
+
+
+## Admin integration
+
+The existing Streamlit admin repository (`Growth-Management/royalty-source-admin`)
+already reads `royalty_audit.production_publish_log`. The next UI change only needs
+to add the following columns to that query and surface them in the production diff view:
+
+- `sales_insert_rows_before`
+- `store_insert_rows_before`
+- `pod_insert_rows_before`
+- `sales_delete_candidate_rows_before`
+- `store_delete_candidate_rows_before`
+- `pod_delete_candidate_rows_before`
+
+The admin app should not implement its own diff algorithm; the Cloud Run Job remains
+the source of truth for classification.
