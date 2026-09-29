@@ -20,6 +20,8 @@ from typing import Any
 import pandas as pd
 from google.cloud import bigquery
 
+from app.source_diff_worker import DiffSummary, compare_stage_to_target, ensure_delete_candidates_safe
+
 
 @dataclass(frozen=True)
 class TableConfig:
@@ -27,24 +29,6 @@ class TableConfig:
     target_table: str
     month_column: str
     source_sql: str
-
-
-@dataclass(frozen=True)
-class Comparison:
-    source_rows: int
-    target_rows: int
-    mismatch_groups: int
-    source_only_rows: int
-    target_only_rows: int
-
-    @property
-    def matched(self) -> bool:
-        return (
-            self.source_rows == self.target_rows
-            and self.mismatch_groups == 0
-            and self.source_only_rows == 0
-            and self.target_only_rows == 0
-        )
 
 
 def parse_args() -> argparse.Namespace:
@@ -207,12 +191,30 @@ def ensure_audit_table(
             , sales_mismatch_groups_before INT64
             , store_mismatch_groups_before INT64
             , pod_mismatch_groups_before INT64
+            , sales_insert_rows_before INT64
+            , store_insert_rows_before INT64
+            , pod_insert_rows_before INT64
+            , sales_delete_candidate_rows_before INT64
+            , store_delete_candidate_rows_before INT64
+            , pod_delete_candidate_rows_before INT64
             , error_message STRING
         )
         PARTITION BY DATE(published_at)
         CLUSTER BY target_month, status
     """
     client.query(sql, location=location).result()
+    for column_name in (
+        "sales_insert_rows_before",
+        "store_insert_rows_before",
+        "pod_insert_rows_before",
+        "sales_delete_candidate_rows_before",
+        "store_delete_candidate_rows_before",
+        "pod_delete_candidate_rows_before",
+    ):
+        client.query(
+            f"ALTER TABLE `{table_id}` ADD COLUMN IF NOT EXISTS {column_name} INT64",
+            location=location,
+        ).result()
     return table_id
 
 
@@ -333,60 +335,6 @@ def load_stage_table(
     return stage_id
 
 
-def compare_stage_to_target(
-    client: bigquery.Client,
-    stage_id: str,
-    target_id: str,
-    month_column: str,
-    target_month: str,
-    location: str,
-) -> Comparison:
-    sql = f"""
-        WITH source_grouped AS (
-            SELECT
-                TO_JSON_STRING(s) AS row_json
-                , COUNT(*) AS row_count
-            FROM
-                `{stage_id}` s
-            GROUP BY
-                row_json
-        )
-        , target_grouped AS (
-            SELECT
-                TO_JSON_STRING(t) AS row_json
-                , COUNT(*) AS row_count
-            FROM
-                `{target_id}` t
-            WHERE
-                {month_column} = @target_month_int
-            GROUP BY
-                row_json
-        )
-        SELECT
-            (SELECT COUNT(*) FROM `{stage_id}`) AS source_rows
-            , (SELECT COUNT(*) FROM `{target_id}` WHERE {month_column} = @target_month_int) AS target_rows
-            , COUNTIF(COALESCE(s.row_count, 0) != COALESCE(t.row_count, 0)) AS mismatch_groups
-            , COALESCE(SUM(GREATEST(COALESCE(s.row_count, 0) - COALESCE(t.row_count, 0), 0)), 0) AS source_only_rows
-            , COALESCE(SUM(GREATEST(COALESCE(t.row_count, 0) - COALESCE(s.row_count, 0), 0)), 0) AS target_only_rows
-        FROM
-            source_grouped s
-        FULL OUTER JOIN
-            target_grouped t
-            USING (row_json)
-    """
-    config = bigquery.QueryJobConfig(
-        query_parameters=[bigquery.ScalarQueryParameter("target_month_int", "INT64", int(target_month))]
-    )
-    row = next(iter(client.query(sql, job_config=config, location=location).result()))
-    return Comparison(
-        source_rows=int(row.source_rows),
-        target_rows=int(row.target_rows),
-        mismatch_groups=int(row.mismatch_groups),
-        source_only_rows=int(row.source_only_rows),
-        target_only_rows=int(row.target_only_rows),
-    )
-
-
 def apply_transaction(
     client: bigquery.Client,
     project_id: str,
@@ -438,6 +386,12 @@ def write_audit(
         "sales_mismatch_groups_before",
         "store_mismatch_groups_before",
         "pod_mismatch_groups_before",
+        "sales_insert_rows_before",
+        "store_insert_rows_before",
+        "pod_insert_rows_before",
+        "sales_delete_candidate_rows_before",
+        "store_delete_candidate_rows_before",
+        "pod_delete_candidate_rows_before",
         "error_message",
     ]
     types = {
@@ -460,6 +414,12 @@ def write_audit(
         "sales_mismatch_groups_before": "INT64",
         "store_mismatch_groups_before": "INT64",
         "pod_mismatch_groups_before": "INT64",
+        "sales_insert_rows_before": "INT64",
+        "store_insert_rows_before": "INT64",
+        "pod_insert_rows_before": "INT64",
+        "sales_delete_candidate_rows_before": "INT64",
+        "store_delete_candidate_rows_before": "INT64",
+        "pod_delete_candidate_rows_before": "INT64",
         "error_message": "STRING",
     }
     params = [
@@ -533,7 +493,7 @@ def main() -> None:
             audit_payload[f"source_{config.key}_rows"] = len(dataframe)
 
         stage_suffix = f"{args.target_month}_{uuid.uuid4().hex[:12]}"
-        comparisons_before: dict[str, Comparison] = {}
+        comparisons_before: dict[str, DiffSummary] = {}
         for config in configs:
             stage_id = load_stage_table(
                 target_client,
@@ -557,6 +517,8 @@ def main() -> None:
             comparisons_before[config.key] = comparison
             audit_payload[f"target_before_{config.key}_rows"] = comparison.target_rows
             audit_payload[f"{config.key}_mismatch_groups_before"] = comparison.mismatch_groups
+            audit_payload[f"{config.key}_insert_rows_before"] = comparison.insert_rows
+            audit_payload[f"{config.key}_delete_candidate_rows_before"] = comparison.delete_candidate_rows
 
         all_matched = all(comparison.matched for comparison in comparisons_before.values())
         if all_matched:
@@ -564,6 +526,7 @@ def main() -> None:
         elif not args.apply:
             status = "DRY_RUN_MISMATCH"
         else:
+            ensure_delete_candidates_safe(comparisons_before)
             apply_transaction(
                 target_client,
                 args.project_id,
@@ -575,7 +538,7 @@ def main() -> None:
             )
             status = "SUCCESS"
 
-        comparisons_after: dict[str, Comparison] = {}
+        comparisons_after: dict[str, DiffSummary] = {}
         for config in configs:
             target_id = f"{args.project_id}.{args.target_dataset}.{config.target_table}"
             comparison = compare_stage_to_target(
@@ -602,8 +565,8 @@ def main() -> None:
                     "apply": args.apply,
                     "status": status,
                     "validation_github_run_id": gate["run_id"],
-                    "before": {key: value.__dict__ for key, value in comparisons_before.items()},
-                    "after": {key: value.__dict__ for key, value in comparisons_after.items()},
+                    "before": {key: value.as_dict() for key, value in comparisons_before.items()},
+                    "after": {key: value.as_dict() for key, value in comparisons_after.items()},
                 },
                 ensure_ascii=False,
                 default=str,
