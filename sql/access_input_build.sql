@@ -9,6 +9,59 @@ CREATE TABLE IF NOT EXISTS `{{ project_id }}.{{ source_dataset }}.legacy_author_
 );
 
 CREATE OR REPLACE TABLE `{{ project_id }}.{{ source_dataset }}.access_input_author_conditions` AS
+WITH combined_author_conditions AS (
+    SELECT
+        product_code
+        , electronic_publication_code
+        , author_identifier_id
+        , title
+        , planning_editor
+        , author_category
+        , payee_code
+        , author_name
+        , payee_name
+        , initial_royalty_rate
+        , revised_royalty_rate
+        , revised_rate_sales_quantity
+        , revised_rate_sales_amount
+        , payment_hold_limit_amount
+        , withholding_tax_type
+        , 0 AS source_priority
+        , row_number AS source_order
+    FROM
+        `{{ project_id }}.{{ source_dataset }}.source_author_conditions`
+    WHERE
+        COALESCE(product_code, electronic_publication_code, author_identifier_id, author_name) IS NOT NULL
+
+    UNION ALL
+
+    SELECT
+        e.product_code
+        , e.electronic_publication_code
+        , e.author_identifier_id
+        , e.title
+        , e.planning_editor
+        , e.author_category
+        , e.payee_code
+        , e.author_name
+        , e.payee_name
+        , e.initial_royalty_rate
+        , e.revised_royalty_rate
+        , e.revised_rate_sales_quantity
+        , e.revised_rate_sales_amount
+        , e.payment_hold_limit_amount
+        , e.withholding_tax_type
+        , 1 AS source_priority
+        , ROW_NUMBER() OVER (ORDER BY e.product_code, e.payee_code, e.added_at) AS source_order
+    FROM
+        `{{ project_id }}.{{ source_dataset }}.source_author_conditions_ext` e
+    WHERE
+        NOT EXISTS (
+            SELECT 1
+            FROM `{{ project_id }}.{{ source_dataset }}.source_author_conditions` b
+            WHERE b.product_code = e.product_code
+        )
+)
 SELECT
     IF(product_code IS NULL, NULL, CONCAT('01-', product_code)) AS product_key
     , product_code
@@ -34,11 +87,10 @@ SELECT
     , CAST(NULL AS STRING) AS product_type
     , CAST(NULL AS STRING) AS sales_start_date
 FROM
-    `{{ project_id }}.{{ source_dataset }}.source_author_conditions`
-WHERE
-    COALESCE(product_code, electronic_publication_code, author_identifier_id, author_name) IS NOT NULL
+    combined_author_conditions
 ORDER BY
-    row_number;
+    source_priority
+    , source_order;
 
 CREATE OR REPLACE TABLE `{{ project_id }}.{{ source_dataset }}.access_input_sales` AS
 WITH current_author_lookup AS (
@@ -70,18 +122,17 @@ WITH current_author_lookup AS (
     ) = 1
 )
 , current_and_ext_author_lookup AS (
-    -- source_author_conditions is frozen (Excel-origin, unmaintained since 2026-07-22);
-    -- source_author_conditions_ext holds product_code mappings added after the freeze and
-    -- wins on conflict so a newly added row can override a stale/missing frozen entry.
+    -- Preserve the frozen/base master when it already contains the product.
+    -- source_author_conditions_ext is a supplement only for products missing from base.
     SELECT
         product_key
         , electronic_publication_code
     FROM (
-        SELECT product_key, electronic_publication_code, 1 AS priority FROM ext_author_lookup
+        SELECT product_key, electronic_publication_code, 0 AS priority FROM ext_author_lookup
 
         UNION ALL
 
-        SELECT product_key, electronic_publication_code, 0 AS priority FROM current_author_lookup
+        SELECT product_key, electronic_publication_code, 1 AS priority FROM current_author_lookup
     )
     QUALIFY ROW_NUMBER() OVER (
         PARTITION BY product_key
@@ -196,18 +247,17 @@ WITH current_author_lookup AS (
     ) = 1
 )
 , current_and_ext_author_lookup AS (
-    -- source_author_conditions is frozen (Excel-origin, unmaintained since 2026-07-22);
-    -- source_author_conditions_ext holds product_code mappings added after the freeze and
-    -- wins on conflict so a newly added row can override a stale/missing frozen entry.
+    -- Preserve the frozen/base master when it already contains the product.
+    -- source_author_conditions_ext is a supplement only for products missing from base.
     SELECT
         product_key
         , electronic_publication_code
     FROM (
-        SELECT product_key, electronic_publication_code, 1 AS priority FROM ext_author_lookup
+        SELECT product_key, electronic_publication_code, 0 AS priority FROM ext_author_lookup
 
         UNION ALL
 
-        SELECT product_key, electronic_publication_code, 0 AS priority FROM current_author_lookup
+        SELECT product_key, electronic_publication_code, 1 AS priority FROM current_author_lookup
     )
     QUALIFY ROW_NUMBER() OVER (
         PARTITION BY product_key
