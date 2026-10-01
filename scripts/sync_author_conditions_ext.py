@@ -165,6 +165,7 @@ def build_salesforce_match_sql(project_id: str, sf_dataset: str) -> str:
                     THEN NULL
                 ELSE raw_revised_rate_sales_amount
             END AS revised_rate_sales_amount
+            , payment_hold_limit_amount
             , withholding_tax_type
         FROM
             matched
