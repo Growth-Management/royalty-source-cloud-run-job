@@ -113,15 +113,27 @@ def build_salesforce_match_sql(project_id: str, sf_dataset: str) -> str:
         WITH matched AS (
             SELECT
                 b.product_code__c AS product_code
+                , b.Id AS biblio_id
                 , bc.Id AS biblio_contributor_id
                 , bc.payee_code__c AS payee_code
+                , CASE
+                    WHEN SAFE_CAST(bc.sequence__c AS NUMERIC) IS NULL THEN NULL
+                    ELSE CONCAT(
+                        b.Id,
+                        LPAD(CAST(CAST(SAFE_CAST(bc.sequence__c AS NUMERIC) AS INT64) AS STRING), 2, '0')
+                    )
+                  END AS author_identifier_id
+                , bc.contributor_role__c AS author_category
                 , bc.contributor_name__c AS author_name
                 , bc.contributor_name__c AS payee_name
+                , b.title__c AS title
+                , b.psf_planning_edit__c AS planning_editor
                 , b.e_publishing_code__c AS electronic_publication_code
                 , SAFE_CAST(bc.royalty_rate_2__c AS NUMERIC) AS revised_royalty_rate
                 , SAFE_CAST(bc.royalty_rate_1__c AS NUMERIC) AS initial_royalty_rate
                 , SAFE_CAST(bc.royalty_condition_quantity_1__c AS NUMERIC) AS raw_revised_rate_sales_quantity
                 , SAFE_CAST(bc.royalty_condition_amount_1__c AS NUMERIC) AS raw_revised_rate_sales_amount
+                , SAFE_CAST(bc.royalty_reservation_price__c AS NUMERIC) AS payment_hold_limit_amount
                 , bc.tax_withholding_type__c AS withholding_tax_type
                 , bc.LastModifiedDate AS last_modified_date
             FROM
@@ -135,10 +147,15 @@ def build_salesforce_match_sql(project_id: str, sf_dataset: str) -> str:
         )
         SELECT
             product_code
+            , biblio_id
             , biblio_contributor_id
             , payee_code
+            , author_identifier_id
+            , author_category
             , author_name
             , payee_name
+            , title
+            , planning_editor
             , electronic_publication_code
             , revised_royalty_rate
             , initial_royalty_rate
@@ -235,6 +252,34 @@ def get_unmatched_product_codes(
     return [row["product_code"] for row in rows]
 
 
+def get_base_missing_product_codes(
+    client: bigquery.Client,
+    project_id: str,
+    source_dataset: str,
+    location: str,
+    target_month: str,
+) -> list[str]:
+    """Return monthly products absent from the frozen/base author-condition master."""
+    sql = f"""
+        SELECT DISTINCT s.product_code
+        FROM `{project_id}.{source_dataset}.source_monthly_product_sales` s
+        WHERE
+            s.target_month = @target_month
+            AND s.product_code IS NOT NULL
+            AND NOT EXISTS (
+                SELECT 1
+                FROM `{project_id}.{source_dataset}.source_author_conditions` a
+                WHERE a.product_code = s.product_code
+            )
+        ORDER BY s.product_code
+    """
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[bigquery.ScalarQueryParameter("target_month", "STRING", target_month)]
+    )
+    rows = client.query(sql, job_config=job_config, location=location).result()
+    return [row["product_code"] for row in rows]
+
+
 def match_against_salesforce(
     client: bigquery.Client,
     project_id: str,
@@ -263,15 +308,21 @@ def match_against_salesforce(
 # execution on 2026-08-28). An explicit schema avoids the autodetect step entirely.
 RELAY_TABLE_SCHEMA = [
     bigquery.SchemaField("product_code", "STRING"),
+    bigquery.SchemaField("biblio_id", "STRING"),
     bigquery.SchemaField("biblio_contributor_id", "STRING"),
     bigquery.SchemaField("payee_code", "STRING"),
+    bigquery.SchemaField("author_identifier_id", "STRING"),
+    bigquery.SchemaField("author_category", "STRING"),
     bigquery.SchemaField("author_name", "STRING"),
     bigquery.SchemaField("payee_name", "STRING"),
+    bigquery.SchemaField("title", "STRING"),
+    bigquery.SchemaField("planning_editor", "STRING"),
     bigquery.SchemaField("electronic_publication_code", "STRING"),
     bigquery.SchemaField("revised_royalty_rate", "NUMERIC"),
     bigquery.SchemaField("initial_royalty_rate", "NUMERIC"),
     bigquery.SchemaField("revised_rate_sales_quantity", "INT64"),
     bigquery.SchemaField("revised_rate_sales_amount", "NUMERIC"),
+    bigquery.SchemaField("payment_hold_limit_amount", "NUMERIC"),
     bigquery.SchemaField("withholding_tax_type", "STRING"),
 ]
 
@@ -310,6 +361,24 @@ def load_relay_table(
     return table_id
 
 
+def ensure_ext_enrichment_columns(
+    client: bigquery.Client,
+    project_id: str,
+    source_dataset: str,
+    location: str,
+) -> None:
+    """Add nullable enrichment columns required by the Access-compatible input."""
+    table_id = f"{project_id}.{source_dataset}.source_author_conditions_ext"
+    sql = f"""
+        ALTER TABLE `{table_id}` ADD COLUMN IF NOT EXISTS author_identifier_id STRING;
+        ALTER TABLE `{table_id}` ADD COLUMN IF NOT EXISTS author_category STRING;
+        ALTER TABLE `{table_id}` ADD COLUMN IF NOT EXISTS title STRING;
+        ALTER TABLE `{table_id}` ADD COLUMN IF NOT EXISTS planning_editor STRING;
+        ALTER TABLE `{table_id}` ADD COLUMN IF NOT EXISTS payment_hold_limit_amount NUMERIC;
+    """
+    client.query(sql, location=location).result()
+
+
 def merge_relay_into_ext(
     client: bigquery.Client,
     relay_table_id: str,
@@ -318,17 +387,53 @@ def merge_relay_into_ext(
     location: str,
     added_by: str,
 ) -> int:
-    sql = f"""
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[bigquery.ScalarQueryParameter("added_by", "STRING", added_by)]
+    )
+
+    update_sql = f"""
+        UPDATE `{project_id}.{source_dataset}.source_author_conditions_ext` e
+        SET
+            electronic_publication_code = r.electronic_publication_code
+            , author_identifier_id = r.author_identifier_id
+            , author_category = r.author_category
+            , author_name = r.author_name
+            , payee_name = r.payee_name
+            , title = r.title
+            , planning_editor = r.planning_editor
+            , revised_royalty_rate = r.revised_royalty_rate
+            , initial_royalty_rate = r.initial_royalty_rate
+            , revised_rate_sales_quantity = CAST(r.revised_rate_sales_quantity AS INT64)
+            , revised_rate_sales_amount = r.revised_rate_sales_amount
+            , payment_hold_limit_amount = r.payment_hold_limit_amount
+            , withholding_tax_type = r.withholding_tax_type
+            , source_detail = r.biblio_contributor_id
+            , added_by = @added_by
+            , added_at = CURRENT_TIMESTAMP()
+        FROM `{relay_table_id}` r
+        WHERE
+            e.product_code = r.product_code
+            AND e.payee_code = r.payee_code
+            AND e.source_type = 'sf_auto'
+    """
+    client.query(update_sql, job_config=job_config, location=location).result()
+
+    insert_sql = f"""
         INSERT INTO `{project_id}.{source_dataset}.source_author_conditions_ext` (
             product_code
             , electronic_publication_code
             , payee_code
+            , author_identifier_id
+            , author_category
             , author_name
             , payee_name
+            , title
+            , planning_editor
             , revised_royalty_rate
             , initial_royalty_rate
             , revised_rate_sales_quantity
             , revised_rate_sales_amount
+            , payment_hold_limit_amount
             , withholding_tax_type
             , source_type
             , source_detail
@@ -339,33 +444,33 @@ def merge_relay_into_ext(
             r.product_code
             , r.electronic_publication_code
             , r.payee_code
+            , r.author_identifier_id
+            , r.author_category
             , r.author_name
             , r.payee_name
+            , r.title
+            , r.planning_editor
             , r.revised_royalty_rate
             , r.initial_royalty_rate
             , CAST(r.revised_rate_sales_quantity AS INT64)
             , r.revised_rate_sales_amount
+            , r.payment_hold_limit_amount
             , r.withholding_tax_type
             , 'sf_auto'
             , r.biblio_contributor_id
             , @added_by
             , CURRENT_TIMESTAMP()
-        FROM
-            `{relay_table_id}` r
-        WHERE
-            NOT EXISTS (
-                SELECT 1
-                FROM `{project_id}.{source_dataset}.source_author_conditions_ext` e
-                WHERE e.product_code = r.product_code AND e.payee_code = r.payee_code
-            )
+        FROM `{relay_table_id}` r
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM `{project_id}.{source_dataset}.source_author_conditions_ext` e
+            WHERE e.product_code = r.product_code
+              AND e.payee_code = r.payee_code
+        )
     """
-    job_config = bigquery.QueryJobConfig(
-        query_parameters=[bigquery.ScalarQueryParameter("added_by", "STRING", added_by)]
-    )
-    job = client.query(sql, job_config=job_config, location=location)
+    job = client.query(insert_sql, job_config=job_config, location=location)
     job.result()
     return int(job.num_dml_affected_rows or 0)
-
 
 def write_unresolved_output(path: str, product_codes: list[str]) -> None:
     if not path:
@@ -440,14 +545,21 @@ def sync_author_conditions_ext(args: argparse.Namespace) -> SyncResult:
     asia_client = bigquery.Client(project=args.project_id, location=args.source_location)
     us_client = bigquery.Client(project=args.project_id, location=args.sf_location)
 
-    unmatched_product_codes = get_unmatched_product_codes(
+    ensure_ext_enrichment_columns(
+        asia_client,
+        args.project_id,
+        args.source_dataset,
+        args.source_location,
+    )
+
+    base_missing_product_codes = get_base_missing_product_codes(
         asia_client,
         args.project_id,
         args.source_dataset,
         args.source_location,
         args.target_month,
     )
-    if not unmatched_product_codes:
+    if not base_missing_product_codes:
         return SyncResult(args.target_month, 0, 0, 0, [])
 
     matched = match_against_salesforce(
@@ -455,7 +567,7 @@ def sync_author_conditions_ext(args: argparse.Namespace) -> SyncResult:
         args.project_id,
         args.sf_dataset,
         args.sf_location,
-        unmatched_product_codes,
+        base_missing_product_codes,
     )
 
     inserted_count = 0
@@ -478,7 +590,13 @@ def sync_author_conditions_ext(args: argparse.Namespace) -> SyncResult:
         )
 
     matched_product_codes = set(matched["product_code"]) if not matched.empty else set()
-    unresolved_product_codes = sorted(set(unmatched_product_codes) - matched_product_codes)
+    unresolved_product_codes = get_unmatched_product_codes(
+        asia_client,
+        args.project_id,
+        args.source_dataset,
+        args.source_location,
+        args.target_month,
+    )
     write_unresolved_table(
         asia_client,
         args.project_id,
@@ -491,7 +609,7 @@ def sync_author_conditions_ext(args: argparse.Namespace) -> SyncResult:
 
     return SyncResult(
         target_month=args.target_month,
-        unmatched_product_count=len(unmatched_product_codes),
+        unmatched_product_count=len(base_missing_product_codes),
         sf_matched_count=len(matched_product_codes),
         inserted_count=inserted_count,
         unresolved_product_codes=unresolved_product_codes,
