@@ -21,7 +21,6 @@ class AccessAuthorConditionsExtSqlTest(unittest.TestCase):
     def test_ext_is_supplement_only_when_base_key_missing(self) -> None:
         self.assertIn("NOT EXISTS", ACCESS_SQL)
         self.assertIn("b.product_code = e.product_code", ACCESS_SQL)
-        self.assertIn("b.payee_code = e.payee_code", ACCESS_SQL)
 
     def test_base_lookup_precedes_ext_for_sales_and_store(self) -> None:
         self.assertGreaterEqual(
@@ -34,8 +33,10 @@ class AccessAuthorConditionsExtSqlTest(unittest.TestCase):
         )
 
     def test_same_product_can_keep_multiple_ext_payees(self) -> None:
-        # The ext supplement is filtered on the logical key, not product_code alone.
-        self.assertIn("b.payee_code = e.payee_code", ACCESS_SQL)
+        # Once a product is eligible for ext supplementation, all ext payees remain rows.
+        ext_block = ACCESS_SQL.split("UNION ALL", 1)[1].split(")\nSELECT", 1)[0]
+        self.assertNotIn("PARTITION BY product_code", ext_block)
+        self.assertNotIn("QUALIFY ROW_NUMBER", ext_block)
 
     def test_ext_rows_are_not_duplicated_by_base(self) -> None:
         # The anti-join makes repeated Access-input builds idempotent.
