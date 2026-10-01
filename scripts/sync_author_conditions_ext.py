@@ -275,6 +275,30 @@ def get_base_missing_product_codes(
     return [row["product_code"] for row in rows]
 
 
+def get_existing_sf_auto_ext_product_codes(
+    client: bigquery.Client,
+    project_id: str,
+    source_dataset: str,
+    location: str,
+) -> list[str]:
+    """Return existing Salesforce-managed ext products so historical rows are refreshable."""
+    sql = f"""
+        SELECT DISTINCT e.product_code
+        FROM `{project_id}.{source_dataset}.source_author_conditions_ext` e
+        WHERE
+            e.source_type = 'sf_auto'
+            AND e.product_code IS NOT NULL
+            AND NOT EXISTS (
+                SELECT 1
+                FROM `{project_id}.{source_dataset}.source_author_conditions` a
+                WHERE a.product_code = e.product_code
+            )
+        ORDER BY e.product_code
+    """
+    rows = client.query(sql, location=location).result()
+    return [row["product_code"] for row in rows]
+
+
 def match_against_salesforce(
     client: bigquery.Client,
     project_id: str,
@@ -557,12 +581,22 @@ def sync_author_conditions_ext(args: argparse.Namespace) -> SyncResult:
     if not base_missing_product_codes:
         return SyncResult(args.target_month, 0, 0, 0, [])
 
+    existing_sf_auto_product_codes = get_existing_sf_auto_ext_product_codes(
+        asia_client,
+        args.project_id,
+        args.source_dataset,
+        args.source_location,
+    )
+    sync_product_codes = sorted(
+        set(base_missing_product_codes) | set(existing_sf_auto_product_codes)
+    )
+
     matched = match_against_salesforce(
         us_client,
         args.project_id,
         args.sf_dataset,
         args.sf_location,
-        base_missing_product_codes,
+        sync_product_codes,
     )
 
     inserted_count = 0

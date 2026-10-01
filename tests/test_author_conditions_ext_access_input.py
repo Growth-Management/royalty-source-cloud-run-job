@@ -88,6 +88,11 @@ class SalesforceExtEnrichmentTest(unittest.TestCase):
         # Update is deliberately limited to sf_auto; manual rows can only block duplicate insert.
         self.assertIn("AND e.source_type = 'sf_auto'", SYNC_SOURCE)
 
+    def test_historical_sf_auto_products_are_refreshed(self) -> None:
+        self.assertIn("get_existing_sf_auto_ext_product_codes", SYNC_SOURCE)
+        self.assertIn("set(base_missing_product_codes) | set(existing_sf_auto_product_codes)", SYNC_SOURCE)
+        self.assertIn("e.source_type = 'sf_auto'", SYNC_SOURCE)
+
 
 if __name__ == "__main__":
     unittest.main()
