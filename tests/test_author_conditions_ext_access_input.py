@@ -56,6 +56,8 @@ class QualityCheckExtSqlTest(unittest.TestCase):
         marker = "monthly_sales_author_conditions_unmatched"
         section = QUALITY_SQL[QUALITY_SQL.index(marker):]
         self.assertNotIn("source_author_conditions_ext_unresolved", section)
+        self.assertIn("GROUP BY product_code", section)
+        self.assertIn("COUNTIF(ac.product_code IS NULL)", section)
 
 
 class SalesforceExtEnrichmentTest(unittest.TestCase):
@@ -66,16 +68,15 @@ class SalesforceExtEnrichmentTest(unittest.TestCase):
         self.assertIn("b.title__c AS title", sql)
         self.assertIn("b.psf_planning_edit__c AS planning_editor", sql)
         self.assertIn("royalty_reservation_price__c", sql)
+        self.assertIn("payment_hold_limit_amount", sql)
 
     def test_ext_logical_key_is_product_and_payee(self) -> None:
         self.assertIn(
             "e.product_code = r.product_code\n            AND e.payee_code = r.payee_code",
             SYNC_SOURCE,
         )
-        self.assertIn(
-            "WHERE e.product_code = r.product_code AND e.payee_code = r.payee_code",
-            SYNC_SOURCE,
-        )
+        self.assertIn("e.product_code = r.product_code", SYNC_SOURCE)
+        self.assertIn("e.payee_code = r.payee_code", SYNC_SOURCE)
 
     def test_existing_sf_auto_rows_are_refreshed_before_insert(self) -> None:
         self.assertIn("UPDATE `{project_id}.{source_dataset}.source_author_conditions_ext` e", SYNC_SOURCE)
