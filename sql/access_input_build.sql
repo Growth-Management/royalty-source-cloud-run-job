@@ -59,9 +59,7 @@ WITH combined_author_conditions AS (
         NOT EXISTS (
             SELECT 1
             FROM `{{ project_id }}.{{ source_dataset }}.source_author_conditions` b
-            WHERE
-                b.product_code = e.product_code
-                AND b.payee_code = e.payee_code
+            WHERE b.product_code = e.product_code
         )
 )
 SELECT
