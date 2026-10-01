@@ -130,7 +130,11 @@ ep_latest_file AS (
   WHERE s.target_month = v_target_month
   UNION ALL
   SELECT 'monthly_sales_author_conditions_unmatched', 'WARNING', 'source_monthly_product_sales',
-    IF(SAFE_DIVIDE(COUNTIF(ac.product_code IS NULL), COUNT(*)) > v_tolerance_rate, COUNTIF(ac.product_code IS NULL), 0),
+    IF(
+      SAFE_DIVIDE(COUNTIF(ac.product_code IS NULL), COUNT(*)) > v_tolerance_rate,
+      COUNTIF(ac.product_code IS NULL),
+      0
+    ),
     TO_JSON_STRING(STRUCT(
       COUNTIF(ac.product_code IS NULL) AS unmatched_count,
       COUNT(*) AS total_count,
@@ -139,7 +143,17 @@ ep_latest_file AS (
       ARRAY_AGG(IF(ac.product_code IS NULL, STRUCT(s.product_code, s.electronic_publication_code), NULL) IGNORE NULLS LIMIT 5) AS sample
     ))
   FROM `{{ project_id }}.{{ source_dataset }}.source_monthly_product_sales` s
-  LEFT JOIN `{{ project_id }}.{{ source_dataset }}.source_author_conditions` ac
+  LEFT JOIN (
+    SELECT DISTINCT product_code
+    FROM `{{ project_id }}.{{ source_dataset }}.source_author_conditions`
+    WHERE product_code IS NOT NULL
+
+    UNION DISTINCT
+
+    SELECT DISTINCT product_code
+    FROM `{{ project_id }}.{{ source_dataset }}.source_author_conditions_ext`
+    WHERE product_code IS NOT NULL
+  ) ac
     ON s.product_code = ac.product_code
   WHERE s.target_month = v_target_month
   UNION ALL
