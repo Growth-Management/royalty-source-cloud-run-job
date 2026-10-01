@@ -73,7 +73,7 @@ class DiffSummary:
 
 @dataclass(frozen=True)
 class DeleteCandidateApproval:
-    """Reviewed approval for production-only rows (future use; not wired to any job).
+    """Reviewed approval for production-only rows.
 
     The approval pins the exact per-table DELETE_CANDIDATE counts that a human reviewed.
     If the dry-run counts differ at apply time, the gate still blocks.
@@ -241,9 +241,9 @@ def ensure_delete_candidates_safe(
 ) -> None:
     """Block apply when production-only rows exist.
 
-    The normal Cloud Run Job path never passes ``approval``. A future reviewed flow may
-    pass one; it only passes when every table's DELETE_CANDIDATE count exactly equals
-    the reviewed count, so a changed dry-run result is blocked again.
+    A reviewed flow may pass ``approval``. It only passes when every table's
+    DELETE_CANDIDATE count exactly equals the reviewed count, so a changed dry-run
+    result is blocked again.
     """
     blocked = {
         key: summary.delete_candidate_rows
