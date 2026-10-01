@@ -189,7 +189,7 @@ jobs:
           gcloud run jobs update "${CLOUD_RUN_JOB}" \
             --project "${GCP_PROJECT_ID}" \
             --region "${CLOUD_RUN_REGION}" \
-            --update-env-vars "^@^JOB_TARGET_MONTH=${TARGET_MONTH}@PRODUCTION_PUBLISH_APPLY=${APPLY}@DELETE_CANDIDATE_APPROVAL_JSON=${APPROVAL_JSON}" \
+            --update-env-vars "^~^JOB_TARGET_MONTH=${TARGET_MONTH}~PRODUCTION_PUBLISH_APPLY=${APPLY}~DELETE_CANDIDATE_APPROVAL_JSON=${APPROVAL_JSON}" \
             --quiet
           EXECUTION_NAME="$(gcloud run jobs execute "${CLOUD_RUN_JOB}" \
             --project "${GCP_PROJECT_ID}" \
@@ -206,7 +206,7 @@ jobs:
           gcloud run jobs update "${CLOUD_RUN_JOB}" \
             --project "${GCP_PROJECT_ID}" \
             --region "${CLOUD_RUN_REGION}" \
-            --update-env-vars "^@^PRODUCTION_PUBLISH_APPLY=false@DELETE_CANDIDATE_APPROVAL_JSON=" \
+            --update-env-vars "^~^PRODUCTION_PUBLISH_APPLY=false~DELETE_CANDIDATE_APPROVAL_JSON=" \
             --quiet
 
       - name: Write summary

@@ -19,7 +19,6 @@ import pandas as pd
 from google.cloud import bigquery
 
 from publish_to_ice_qb_source_p1 import (
-    Comparison,
     compare_stage_to_target,
     get_promotion_gate,
     load_stage_table,
@@ -28,6 +27,7 @@ from publish_to_ice_qb_source_p1 import (
     validate_cumulative_snapshot,
     validate_target_month,
 )
+from app.source_diff_worker import DiffSummary
 
 
 PROJECT_ID = os.getenv("GCP_PROJECT_ID", "ice-qb")
@@ -59,7 +59,7 @@ def compare_projection(
     target_month: str,
     location: str,
     select_expression: str,
-) -> Comparison:
+) -> DiffSummary:
     sql = f"""
         WITH source_grouped AS (
             SELECT
@@ -112,12 +112,15 @@ def compare_projection(
             ).result()
         )
     )
-    return Comparison(
+    source_only_rows = int(row.source_only_rows)
+    target_only_rows = int(row.target_only_rows)
+    return DiffSummary(
         source_rows=int(row.source_rows),
         target_rows=int(row.target_rows),
         mismatch_groups=int(row.mismatch_groups),
-        source_only_rows=int(row.source_only_rows),
-        target_only_rows=int(row.target_only_rows),
+        unchanged_rows=int(row.source_rows) - source_only_rows,
+        insert_rows=source_only_rows,
+        delete_candidate_rows=target_only_rows,
     )
 
 
@@ -129,7 +132,7 @@ def compare_without_column(
     target_month: str,
     location: str,
     column_name: str,
-) -> Comparison:
+) -> DiffSummary:
     expression = f"(SELECT AS STRUCT {{alias}}.* EXCEPT (`{column_name}`))"
     return compare_projection(
         client,
@@ -150,7 +153,7 @@ def compare_column_values(
     target_month: str,
     location: str,
     column_name: str,
-) -> Comparison:
+) -> DiffSummary:
     expression = f"{{alias}}.`{column_name}`"
     return compare_projection(
         client,
