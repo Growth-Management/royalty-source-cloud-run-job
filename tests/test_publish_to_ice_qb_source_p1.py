@@ -7,12 +7,13 @@ import os
 import subprocess
 import sys
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
 import pandas as pd
 
-from app.source_diff_worker import DiffSummary
+from app.source_diff_worker import DeleteCandidateApproval, DiffSummary
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT_PATH = REPO_ROOT / "scripts" / "publish_to_ice_qb_source_p1.py"
@@ -74,6 +75,70 @@ class DecidePublishStatusTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "DELETE_CANDIDATE"):
             publisher.decide_publish_status({"sales": INSERT_ONLY, "pod": WITH_DELETE_CANDIDATE}, True)
 
+    def test_apply_with_exact_reviewed_delete_candidates_proceeds(self) -> None:
+        approval = DeleteCandidateApproval(
+            target_month="202608",
+            approved_by="reviewer@example.com",
+            approved_at=datetime(2026, 10, 1, tzinfo=timezone.utc),
+            validation_run_id="999",
+            delete_candidate_rows={"pod": 1},
+        )
+        self.assertEqual(
+            publisher.decide_publish_status(
+                {"sales": INSERT_ONLY, "pod": WITH_DELETE_CANDIDATE},
+                True,
+                target_month="202608",
+                validation_run_id="999",
+                approval=approval,
+            ),
+            "APPLY",
+        )
+
+    def test_apply_with_approval_for_different_validation_run_is_blocked(self) -> None:
+        approval = DeleteCandidateApproval(
+            target_month="202608",
+            approved_by="reviewer@example.com",
+            approved_at=datetime(2026, 10, 1, tzinfo=timezone.utc),
+            validation_run_id="998",
+            delete_candidate_rows={"pod": 1},
+        )
+        with self.assertRaisesRegex(RuntimeError, "validation_run_id"):
+            publisher.decide_publish_status(
+                {"pod": WITH_DELETE_CANDIDATE},
+                True,
+                target_month="202608",
+                validation_run_id="999",
+                approval=approval,
+            )
+
+
+class ApprovalParsingTest(unittest.TestCase):
+    def test_parses_reviewed_approval(self) -> None:
+        approval = publisher.parse_delete_candidate_approval(
+            '{"target_month":"202608","approved_by":"reviewer@example.com",'
+            '"approved_at":"2026-10-01T10:00:00Z","validation_run_id":"999",'
+            '"delete_candidate_rows":{"sales":258,"store":1397,"pod":0}}'
+        )
+        self.assertEqual(approval.target_month, "202608")
+        self.assertEqual(approval.delete_candidate_rows["store"], 1397)
+        self.assertIsNotNone(approval.approved_at.tzinfo)
+
+    def test_rejects_unknown_table(self) -> None:
+        with self.assertRaisesRegex(ValueError, "unknown tables"):
+            publisher.parse_delete_candidate_approval(
+                '{"target_month":"202608","approved_by":"reviewer@example.com",'
+                '"approved_at":"2026-10-01T10:00:00Z","validation_run_id":"999",'
+                '"delete_candidate_rows":{"authors":31}}'
+            )
+
+    def test_rejects_non_integer_count(self) -> None:
+        with self.assertRaisesRegex(ValueError, "must be an integer"):
+            publisher.parse_delete_candidate_approval(
+                '{"target_month":"202608","approved_by":"reviewer@example.com",'
+                '"approved_at":"2026-10-01T10:00:00Z","validation_run_id":"999",'
+                '"delete_candidate_rows":{"sales":1.5}}'
+            )
+
 
 class AuditColumnsTest(unittest.TestCase):
     def test_diff_audit_columns(self) -> None:
@@ -88,8 +153,9 @@ class AuditColumnsTest(unittest.TestCase):
 
     def test_alter_sql_only_for_missing_columns(self) -> None:
         table_id = "ice-qb.royalty_audit.production_publish_log"
-        self.assertIsNone(publisher.build_add_diff_columns_sql(table_id, set(publisher.DIFF_AUDIT_COLUMNS)))
-        existing = set(publisher.DIFF_AUDIT_COLUMNS) - {"pod_unchanged_rows_before", "sales_insert_rows_before"}
+        all_optional_columns = set(publisher.DIFF_AUDIT_COLUMNS) | set(publisher.APPROVAL_AUDIT_COLUMNS)
+        self.assertIsNone(publisher.build_add_diff_columns_sql(table_id, all_optional_columns))
+        existing = all_optional_columns - {"pod_unchanged_rows_before", "sales_insert_rows_before"}
         sql = publisher.build_add_diff_columns_sql(table_id, existing)
         self.assertEqual(sql.count("ALTER TABLE"), 1)
         self.assertEqual(sql.count("ADD COLUMN IF NOT EXISTS"), 2)
@@ -98,7 +164,10 @@ class AuditColumnsTest(unittest.TestCase):
 
     def test_ensure_audit_table_skips_ddl_when_columns_exist(self) -> None:
         client = mock.MagicMock()
-        client.get_table.return_value.schema = [_field(name) for name in publisher.DIFF_AUDIT_COLUMNS]
+        client.get_table.return_value.schema = [
+            _field(name)
+            for name in (*publisher.DIFF_AUDIT_COLUMNS, *publisher.APPROVAL_AUDIT_COLUMNS)
+        ]
         publisher.ensure_audit_table(client, "ice-qb", "royalty_audit", "asia-northeast1")
         issued = [call.args[0] for call in client.query.call_args_list]
         self.assertEqual(len(issued), 1)
@@ -111,7 +180,7 @@ class AuditColumnsTest(unittest.TestCase):
         issued = [call.args[0] for call in client.query.call_args_list]
         self.assertEqual(len(issued), 2)
         self.assertTrue(issued[1].startswith("ALTER TABLE `ice-qb.royalty_audit.production_publish_log`"))
-        self.assertEqual(issued[1].count("ADD COLUMN IF NOT EXISTS"), 9)
+        self.assertEqual(issued[1].count("ADD COLUMN IF NOT EXISTS"), 13)
 
 
 class StageMonthGuardTest(unittest.TestCase):
@@ -144,6 +213,7 @@ class MainFlowTest(unittest.TestCase):
         after: dict[str, DiffSummary] | None = None,
         audit_error: Exception | None = None,
         month_guard_error: Exception | None = None,
+        approval_json: str = "",
     ) -> tuple[dict, mock.MagicMock, mock.MagicMock, Exception | None]:
         after = after or before
         compare_results = [before[k] for k in ("sales", "store", "pod")] + [
@@ -160,7 +230,13 @@ class MainFlowTest(unittest.TestCase):
         source_client = mock.MagicMock(name="source_client")
         clients = iter([source_client, target_client])
         argv = ["publish", "--target-month", "202608"] + (["--apply"] if apply else [])
-        env = {k: v for k, v in os.environ.items() if k != "PRODUCTION_PUBLISH_APPLY"}
+        env = {
+            k: v
+            for k, v in os.environ.items()
+            if k not in {"PRODUCTION_PUBLISH_APPLY", "DELETE_CANDIDATE_APPROVAL_JSON"}
+        }
+        if approval_json:
+            env["DELETE_CANDIDATE_APPROVAL_JSON"] = approval_json
 
         patches = [
             mock.patch.object(sys, "argv", argv),
@@ -220,6 +296,27 @@ class MainFlowTest(unittest.TestCase):
         self.assertEqual(payload["status"], "FAILED")
         self.assertIn("DELETE_CANDIDATE", payload["error_message"])
         self.assertEqual(payload["store_delete_candidate_rows_before"], 1)
+        self.assertEqual(target_client.delete_table.call_count, 3)
+
+    def test_apply_with_reviewed_delete_candidates_runs_and_audits_approval(self) -> None:
+        before = {"sales": INSERT_ONLY, "store": WITH_DELETE_CANDIDATE, "pod": MATCHED}
+        after = self._all(MATCHED)
+        approval_json = (
+            '{"target_month":"202608","approved_by":"reviewer@example.com",'
+            '"approved_at":"2026-10-01T10:00:00Z","validation_run_id":"999",'
+            '"delete_candidate_rows":{"store":1}}'
+        )
+        payload, apply_transaction, target_client, error = self._run_main(
+            apply=True,
+            before=before,
+            after=after,
+            approval_json=approval_json,
+        )
+        self.assertIsNone(error)
+        apply_transaction.assert_called_once()
+        self.assertEqual(payload["status"], "SUCCESS")
+        self.assertEqual(payload["delete_candidate_approved_by"], "reviewer@example.com")
+        self.assertEqual(payload["delete_candidate_approval_validation_run_id"], "999")
         self.assertEqual(target_client.delete_table.call_count, 3)
 
     def test_apply_insert_only_runs_transaction_and_verifies(self) -> None:

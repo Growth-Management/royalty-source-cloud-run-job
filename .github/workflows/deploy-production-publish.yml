@@ -31,6 +31,21 @@ on:
         required: false
         default: ""
         type: string
+      delete_candidate_approved_by:
+        description: "Reviewer identity when reviewed DELETE_CANDIDATE rows are approved"
+        required: false
+        default: ""
+        type: string
+      delete_candidate_validation_run_id:
+        description: "Validation Run ID tied to the reviewed DELETE_CANDIDATE counts"
+        required: false
+        default: ""
+        type: string
+      delete_candidate_counts_json:
+        description: 'Exact reviewed counts, for example {"sales":258,"store":1397}'
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
@@ -120,6 +135,9 @@ jobs:
           TARGET_MONTH: ${{ inputs.target_month }}
           APPLY: ${{ inputs.apply }}
           CONFIRMATION: ${{ inputs.confirmation }}
+          DELETE_CANDIDATE_APPROVED_BY: ${{ inputs.delete_candidate_approved_by }}
+          DELETE_CANDIDATE_VALIDATION_RUN_ID: ${{ inputs.delete_candidate_validation_run_id }}
+          DELETE_CANDIDATE_COUNTS_JSON: ${{ inputs.delete_candidate_counts_json }}
         run: |
           set -euo pipefail
           if [[ ! "${TARGET_MONTH}" =~ ^[0-9]{6}$ ]]; then
@@ -135,6 +153,15 @@ jobs:
             echo "apply=true requires confirmation to exactly match target_month" >&2
             exit 1
           fi
+          if [ -n "${DELETE_CANDIDATE_COUNTS_JSON}" ]; then
+            test -n "${DELETE_CANDIDATE_APPROVED_BY}"
+            test -n "${DELETE_CANDIDATE_VALIDATION_RUN_ID}"
+            echo "${DELETE_CANDIDATE_COUNTS_JSON}" | jq -e '
+              type == "object" and
+              all(keys[]; . == "sales" or . == "store" or . == "pod") and
+              all(.[]; type == "number" and floor == . and . >= 0)
+            ' >/dev/null
+          fi
 
       - name: Execute production publish job
         if: github.event_name == 'workflow_dispatch' && inputs.execute
@@ -143,12 +170,26 @@ jobs:
         env:
           TARGET_MONTH: ${{ inputs.target_month }}
           APPLY: ${{ inputs.apply }}
+          DELETE_CANDIDATE_APPROVED_BY: ${{ inputs.delete_candidate_approved_by }}
+          DELETE_CANDIDATE_VALIDATION_RUN_ID: ${{ inputs.delete_candidate_validation_run_id }}
+          DELETE_CANDIDATE_COUNTS_JSON: ${{ inputs.delete_candidate_counts_json }}
         run: |
           set -euo pipefail
+          APPROVAL_JSON=""
+          if [ -n "${DELETE_CANDIDATE_COUNTS_JSON}" ]; then
+            APPROVED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            APPROVAL_JSON="$(jq -cn \
+              --arg target_month "${TARGET_MONTH}" \
+              --arg approved_by "${DELETE_CANDIDATE_APPROVED_BY}" \
+              --arg approved_at "${APPROVED_AT}" \
+              --arg validation_run_id "${DELETE_CANDIDATE_VALIDATION_RUN_ID}" \
+              --argjson delete_candidate_rows "${DELETE_CANDIDATE_COUNTS_JSON}" \
+              '{target_month:$target_month,approved_by:$approved_by,approved_at:$approved_at,validation_run_id:$validation_run_id,delete_candidate_rows:$delete_candidate_rows}')"
+          fi
           gcloud run jobs update "${CLOUD_RUN_JOB}" \
             --project "${GCP_PROJECT_ID}" \
             --region "${CLOUD_RUN_REGION}" \
-            --update-env-vars "JOB_TARGET_MONTH=${TARGET_MONTH},PRODUCTION_PUBLISH_APPLY=${APPLY}" \
+            --update-env-vars "^@^JOB_TARGET_MONTH=${TARGET_MONTH}@PRODUCTION_PUBLISH_APPLY=${APPLY}@DELETE_CANDIDATE_APPROVAL_JSON=${APPROVAL_JSON}" \
             --quiet
           EXECUTION_NAME="$(gcloud run jobs execute "${CLOUD_RUN_JOB}" \
             --project "${GCP_PROJECT_ID}" \
@@ -165,7 +206,7 @@ jobs:
           gcloud run jobs update "${CLOUD_RUN_JOB}" \
             --project "${GCP_PROJECT_ID}" \
             --region "${CLOUD_RUN_REGION}" \
-            --update-env-vars "PRODUCTION_PUBLISH_APPLY=false" \
+            --update-env-vars "^@^PRODUCTION_PUBLISH_APPLY=false@DELETE_CANDIDATE_APPROVAL_JSON=" \
             --quiet
 
       - name: Write summary

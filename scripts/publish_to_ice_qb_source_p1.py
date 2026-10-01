@@ -28,6 +28,7 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 from app.source_diff_worker import (  # noqa: E402
+    DeleteCandidateApproval,
     DiffSummary,
     compare_stage_to_target,
     ensure_delete_candidates_safe,
@@ -40,6 +41,12 @@ DIFF_AUDIT_COLUMNS = tuple(
     for metric in ("unchanged", "insert", "delete_candidate")
     for key in TABLE_KEYS
 )
+APPROVAL_AUDIT_COLUMNS = {
+    "delete_candidate_approved_by": "STRING",
+    "delete_candidate_approved_at": "TIMESTAMP",
+    "delete_candidate_approval_validation_run_id": "STRING",
+    "delete_candidate_approval_counts_json": "STRING",
+}
 
 
 @dataclass(frozen=True)
@@ -64,6 +71,14 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         default=os.getenv("PRODUCTION_PUBLISH_APPLY", "false").lower() == "true",
     )
+    parser.add_argument(
+        "--delete-candidate-approval-json",
+        default=os.getenv("DELETE_CANDIDATE_APPROVAL_JSON", ""),
+        help=(
+            "Reviewed approval JSON with target_month, approved_by, approved_at, "
+            "validation_run_id, and delete_candidate_rows."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -73,6 +88,57 @@ def validate_target_month(target_month: str) -> None:
     month = int(target_month[4:6])
     if month < 1 or month > 12:
         raise ValueError(f"invalid target month: {target_month}")
+
+
+def parse_delete_candidate_approval(raw_json: str) -> DeleteCandidateApproval | None:
+    if not raw_json.strip():
+        return None
+    try:
+        payload = json.loads(raw_json)
+    except json.JSONDecodeError as exc:
+        raise ValueError("DELETE_CANDIDATE_APPROVAL_JSON must be valid JSON") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("DELETE_CANDIDATE_APPROVAL_JSON must be a JSON object")
+
+    required = {
+        "target_month",
+        "approved_by",
+        "approved_at",
+        "validation_run_id",
+        "delete_candidate_rows",
+    }
+    missing = sorted(required - payload.keys())
+    if missing:
+        raise ValueError(f"delete candidate approval is missing fields: {', '.join(missing)}")
+
+    try:
+        approved_at = datetime.fromisoformat(str(payload["approved_at"]).replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError("delete candidate approval approved_at must be ISO-8601") from exc
+    if approved_at.tzinfo is None:
+        raise ValueError("delete candidate approval approved_at must include a timezone")
+
+    counts = payload["delete_candidate_rows"]
+    if not isinstance(counts, dict):
+        raise ValueError("delete candidate approval delete_candidate_rows must be an object")
+    unknown = sorted(set(counts) - set(TABLE_KEYS))
+    if unknown:
+        raise ValueError(f"delete candidate approval contains unknown tables: {', '.join(unknown)}")
+    normalized_counts: dict[str, int] = {}
+    for key, value in counts.items():
+        if not isinstance(value, int) or isinstance(value, bool):
+            raise ValueError(f"delete candidate approval count for {key} must be an integer")
+        if value < 0:
+            raise ValueError(f"delete candidate approval count for {key} must be non-negative")
+        normalized_counts[key] = value
+
+    return DeleteCandidateApproval(
+        target_month=str(payload["target_month"]),
+        approved_by=str(payload["approved_by"]),
+        approved_at=approved_at,
+        validation_run_id=str(payload["validation_run_id"]),
+        delete_candidate_rows=normalized_counts,
+    )
 
 
 def table_configs(project_id: str, source_dataset: str) -> list[TableConfig]:
@@ -210,6 +276,10 @@ def ensure_audit_table(
             , sales_mismatch_groups_before INT64
             , store_mismatch_groups_before INT64
             , pod_mismatch_groups_before INT64
+            , delete_candidate_approved_by STRING
+            , delete_candidate_approved_at TIMESTAMP
+            , delete_candidate_approval_validation_run_id STRING
+            , delete_candidate_approval_counts_json STRING
             , error_message STRING
         )
         PARTITION BY DATE(published_at)
@@ -226,14 +296,27 @@ def ensure_audit_table(
 
 
 def build_add_diff_columns_sql(table_id: str, existing_columns: set[str]) -> str | None:
-    missing = [name for name in DIFF_AUDIT_COLUMNS if name not in existing_columns]
-    if not missing:
+    missing_types = {
+        **{name: "INT64" for name in DIFF_AUDIT_COLUMNS if name not in existing_columns},
+        **{name: column_type for name, column_type in APPROVAL_AUDIT_COLUMNS.items() if name not in existing_columns},
+    }
+    if not missing_types:
         return None
-    clauses = ", ".join(f"ADD COLUMN IF NOT EXISTS {name} INT64" for name in missing)
+    clauses = ", ".join(
+        f"ADD COLUMN IF NOT EXISTS {name} {column_type}"
+        for name, column_type in missing_types.items()
+    )
     return f"ALTER TABLE `{table_id}` {clauses}"
 
 
-def decide_publish_status(comparisons: dict[str, DiffSummary], apply: bool) -> str:
+def decide_publish_status(
+    comparisons: dict[str, DiffSummary],
+    apply: bool,
+    *,
+    target_month: str | None = None,
+    validation_run_id: str | None = None,
+    approval: DeleteCandidateApproval | None = None,
+) -> str:
     """Return ALREADY_MATCHED, DRY_RUN_MISMATCH, or APPLY.
 
     The DELETE_CANDIDATE gate only fires when apply is requested; dry-run always
@@ -243,7 +326,15 @@ def decide_publish_status(comparisons: dict[str, DiffSummary], apply: bool) -> s
         return "ALREADY_MATCHED"
     if not apply:
         return "DRY_RUN_MISMATCH"
-    ensure_delete_candidates_safe(comparisons)
+    if approval is not None:
+        if target_month is None or validation_run_id is None:
+            raise ValueError("target_month and validation_run_id are required with an approval")
+        if approval.validation_run_id != validation_run_id:
+            raise RuntimeError(
+                "DELETE_CANDIDATE approval validation_run_id differs from the promoted snapshot; "
+                f"actual={validation_run_id}, approved={approval.validation_run_id}"
+            )
+    ensure_delete_candidates_safe(comparisons, target_month=target_month, approval=approval)
     return "APPLY"
 
 
@@ -446,6 +537,7 @@ def write_audit(
         "store_mismatch_groups_before",
         "pod_mismatch_groups_before",
         *DIFF_AUDIT_COLUMNS,
+        *APPROVAL_AUDIT_COLUMNS,
         "error_message",
     ]
     types = {
@@ -469,6 +561,7 @@ def write_audit(
         "store_mismatch_groups_before": "INT64",
         "pod_mismatch_groups_before": "INT64",
         **{name: "INT64" for name in DIFF_AUDIT_COLUMNS},
+        **APPROVAL_AUDIT_COLUMNS,
         "error_message": "STRING",
     }
     params = [
@@ -506,6 +599,10 @@ def main() -> None:
         "apply_requested": args.apply,
         "status": "FAILED",
         "execution_name": execution_name,
+        "delete_candidate_approved_by": None,
+        "delete_candidate_approved_at": None,
+        "delete_candidate_approval_validation_run_id": None,
+        "delete_candidate_approval_counts_json": None,
         "error_message": None,
     }
     stage_ids: dict[str, str] = {}
@@ -520,6 +617,14 @@ def main() -> None:
         )
         audit_payload["validation_github_run_id"] = gate["run_id"]
         audit_payload["cumulative_promoted_at"] = gate["promoted_at"]
+        approval = parse_delete_candidate_approval(args.delete_candidate_approval_json)
+        if approval is not None:
+            audit_payload["delete_candidate_approved_by"] = approval.approved_by
+            audit_payload["delete_candidate_approved_at"] = approval.approved_at
+            audit_payload["delete_candidate_approval_validation_run_id"] = approval.validation_run_id
+            audit_payload["delete_candidate_approval_counts_json"] = json.dumps(
+                dict(approval.delete_candidate_rows), sort_keys=True
+            )
         validate_cumulative_snapshot(
             source_client,
             args.project_id,
@@ -570,7 +675,13 @@ def main() -> None:
             audit_payload[f"{config.key}_insert_rows_before"] = comparison.insert_rows
             audit_payload[f"{config.key}_delete_candidate_rows_before"] = comparison.delete_candidate_rows
 
-        status = decide_publish_status(comparisons_before, args.apply)
+        status = decide_publish_status(
+            comparisons_before,
+            args.apply,
+            target_month=args.target_month,
+            validation_run_id=gate["run_id"],
+            approval=approval,
+        )
         if status == "APPLY":
             for config in configs:
                 ensure_stage_within_target_month(
