@@ -116,13 +116,7 @@ def build_salesforce_match_sql(project_id: str, sf_dataset: str) -> str:
                 , b.Id AS biblio_id
                 , bc.Id AS biblio_contributor_id
                 , bc.payee_code__c AS payee_code
-                , CASE
-                    WHEN SAFE_CAST(bc.sequence__c AS NUMERIC) IS NULL THEN NULL
-                    ELSE CONCAT(
-                        b.Id,
-                        LPAD(CAST(CAST(SAFE_CAST(bc.sequence__c AS NUMERIC) AS INT64) AS STRING), 2, '0')
-                    )
-                  END AS author_identifier_id
+                , bc.contributor_id__c AS author_identifier_id
                 , bc.contributor_role__c AS author_category
                 , bc.contributor_name__c AS author_name
                 , bc.contributor_name__c AS payee_name
