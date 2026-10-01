@@ -97,6 +97,56 @@ WITH seed AS (
             ORDER BY r.loaded_at DESC
         ) = 1
 )
+, product_master_normalized AS (
+    SELECT
+        product_code
+        , CASE
+            WHEN REGEXP_CONTAINS(UPPER(TRIM(isbn)), r'E[+-]?\d+') THEN FORMAT('%.0f', SAFE_CAST(isbn AS FLOAT64))
+            ELSE REGEXP_REPLACE(REGEXP_REPLACE(TRIM(isbn), r'\.0$', ''), r'[^0-9Xx]', '')
+        END AS normalized_isbn
+        , CASE
+            WHEN REGEXP_CONTAINS(UPPER(TRIM(base_isbn)), r'E[+-]?\d+') THEN FORMAT('%.0f', SAFE_CAST(base_isbn AS FLOAT64))
+            ELSE REGEXP_REPLACE(REGEXP_REPLACE(TRIM(base_isbn), r'\.0$', ''), r'[^0-9Xx]', '')
+        END AS normalized_base_isbn
+        , TRIM(title) AS master_title
+        , REGEXP_REPLACE(
+            NORMALIZE_AND_CASEFOLD(TRIM(title))
+            , r'[\p{P}\p{Z}\p{S}]'
+            , ''
+        ) AS normalized_title
+        , NULLIF(TRIM(electronic_publication_code), '') AS electronic_publication_code
+    FROM
+        `{{ project_id }}.{{ source_dataset }}.source_product_master`
+)
+, product_master_title_isbn AS (
+    SELECT
+        normalized_title
+        , ANY_VALUE(NULLIF(normalized_base_isbn, '')) AS normalized_title_isbn
+    FROM
+        product_master_normalized
+    WHERE
+        NULLIF(normalized_base_isbn, '') IS NOT NULL
+    GROUP BY
+        normalized_title
+    HAVING
+        COUNT(DISTINCT normalized_base_isbn) = 1
+)
+, product_master_physical AS (
+    SELECT
+        p.product_code
+        , COALESCE(NULLIF(p.normalized_isbn, ''), t.normalized_title_isbn) AS normalized_isbn
+        , p.master_title
+        , p.normalized_title
+    FROM
+        product_master_normalized p
+    LEFT JOIN
+        product_master_title_isbn t
+        USING (normalized_title)
+    WHERE
+        p.electronic_publication_code IS NULL
+        AND NULLIF(p.normalized_base_isbn, '') IS NULL
+        AND NULLIF(TRIM(p.product_code), '') IS NOT NULL
+)
 , amazon AS (
     SELECT
         v_target_month AS target_month
@@ -104,7 +154,7 @@ WITH seed AS (
         , TRIM(product_code) AS product_code
         , CASE
             WHEN REGEXP_CONTAINS(UPPER(TRIM(isbn)), r'E[+-]?\d+') THEN FORMAT('%.0f', SAFE_CAST(isbn AS FLOAT64))
-            ELSE REGEXP_REPLACE(TRIM(isbn), r'[^0-9Xx]', '')
+            ELSE REGEXP_REPLACE(REGEXP_REPLACE(TRIM(isbn), r'\.0$', ''), r'[^0-9Xx]', '')
         END AS isbn
         , TRIM(title) AS title
         , SAFE_CAST(REGEXP_REPLACE(unit_price, r'[^0-9.\-]', '') AS NUMERIC) AS unit_price
@@ -134,7 +184,7 @@ WITH seed AS (
         , '' AS product_code
         , CASE
             WHEN REGEXP_CONTAINS(UPPER(TRIM(isbn)), r'E[+-]?\d+') THEN FORMAT('%.0f', SAFE_CAST(isbn AS FLOAT64))
-            ELSE REGEXP_REPLACE(TRIM(isbn), r'[^0-9Xx]', '')
+            ELSE REGEXP_REPLACE(REGEXP_REPLACE(TRIM(isbn), r'\.0$', ''), r'[^0-9Xx]', '')
         END AS isbn
         , TRIM(title) AS title
         , SAFE_CAST(REGEXP_REPLACE(unit_price, r'[^0-9.\-]', '') AS NUMERIC) AS unit_price
@@ -160,25 +210,132 @@ WITH seed AS (
     WHERE
         COALESCE(SAFE_CAST(REGEXP_REPLACE(quantity, r'[^0-9\-]', '') AS INT64), 0) != 0
 )
+, monthly_unenriched AS (
+    SELECT
+        *
+    FROM
+        amazon
+    WHERE
+        COALESCE(quantity, 0) != 0
+    UNION ALL
+    SELECT
+        *
+    FROM
+        pf
+)
+, monthly_match_candidates AS (
+    SELECT
+        m.*
+        , pm.product_code AS master_product_code
+        , pm.normalized_isbn AS master_isbn
+        , pm.master_title
+        , COUNTIF(
+            pm.product_code IS NOT NULL
+            AND NULLIF(m.isbn, '') IS NOT NULL
+            AND m.isbn = pm.normalized_isbn
+        ) OVER source_row AS exact_isbn_match_count
+        , COUNTIF(
+            pm.product_code IS NOT NULL
+            AND REGEXP_REPLACE(
+                NORMALIZE_AND_CASEFOLD(TRIM(m.title))
+                , r'[\p{P}\p{Z}\p{S}]'
+                , ''
+            ) = pm.normalized_title
+        ) OVER source_row AS normalized_title_match_count
+        , ROW_NUMBER() OVER (
+            source_row
+            ORDER BY
+                IF(
+                    NULLIF(m.isbn, '') IS NOT NULL
+                    AND m.isbn = pm.normalized_isbn
+                    , 2
+                    , 1
+                ) DESC
+                , pm.product_code
+        ) AS match_rank
+    FROM
+        monthly_unenriched m
+    LEFT JOIN
+        product_master_physical pm
+        ON NULLIF(TRIM(m.product_code), '') IS NULL
+        AND (
+            (
+                NULLIF(m.isbn, '') IS NOT NULL
+                AND m.isbn = pm.normalized_isbn
+            )
+            OR (
+                NULLIF(
+                    REGEXP_REPLACE(
+                        NORMALIZE_AND_CASEFOLD(TRIM(m.title))
+                        , r'[\p{P}\p{Z}\p{S}]'
+                        , ''
+                    )
+                    , ''
+                ) IS NOT NULL
+                AND REGEXP_REPLACE(
+                    NORMALIZE_AND_CASEFOLD(TRIM(m.title))
+                    , r'[\p{P}\p{Z}\p{S}]'
+                    , ''
+                ) = pm.normalized_title
+            )
+        )
+    WINDOW source_row AS (
+        PARTITION BY m.source_kind, m.source_file_id, m.source_row_number
+    )
+)
+, monthly_enriched AS (
+    SELECT
+        target_month
+        , publisher
+        , CASE
+            WHEN NULLIF(TRIM(product_code), '') IS NOT NULL THEN TRIM(product_code)
+            WHEN exact_isbn_match_count = 1 THEN master_product_code
+            WHEN exact_isbn_match_count = 0 AND normalized_title_match_count = 1 THEN master_product_code
+            ELSE ''
+        END AS product_code
+        , CASE
+            WHEN exact_isbn_match_count = 1 THEN COALESCE(NULLIF(master_isbn, ''), isbn)
+            WHEN exact_isbn_match_count = 0 AND normalized_title_match_count = 1
+                THEN COALESCE(NULLIF(master_isbn, ''), isbn)
+            ELSE isbn
+        END AS isbn
+        , CASE
+            WHEN exact_isbn_match_count = 1 THEN COALESCE(NULLIF(master_title, ''), title)
+            WHEN exact_isbn_match_count = 0 AND normalized_title_match_count = 1
+                THEN COALESCE(NULLIF(master_title, ''), title)
+            ELSE title
+        END AS title
+        , unit_price
+        , rate
+        , quantity
+        , net_amount
+        , tax
+        , sales_amount
+        , manufacturing_cost
+        , factor_15
+        , factor_108
+        , pages
+        , dl_month
+        , sales_month
+        , source_kind
+        , source_row_number
+        , source_file_id
+        , source_file_name
+        , loaded_at
+    FROM
+        monthly_match_candidates
+    WHERE
+        match_rank = 1
+)
 SELECT
     *
 FROM
     seed
 UNION ALL
 SELECT
-    a.*
+    m.*
 FROM
-    amazon a
-CROSS JOIN
-    seed_state s
-WHERE
-    NOT s.has_seed
-    AND COALESCE(a.quantity, 0) != 0
-UNION ALL
-SELECT
-    p.*
-FROM
-    pf p
+    monthly_enriched m
 CROSS JOIN
     seed_state s
 WHERE

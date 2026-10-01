@@ -99,6 +99,17 @@ WITH pod_stats AS (
     UNION ALL
 
     SELECT
+        'access_input_pod_sales_product_code_blank', 'ERROR', 'access_input_pod_sales',
+        COUNTIF(NULLIF(TRIM(product_code), '') IS NULL),
+        TO_JSON_STRING(ARRAY_AGG(IF(
+            NULLIF(TRIM(product_code), '') IS NULL,
+            STRUCT(source_kind, source_row_number, isbn, title), NULL
+        ) IGNORE NULLS LIMIT 5))
+    FROM `{{ project_id }}.{{ source_dataset }}.access_input_pod_sales`
+
+    UNION ALL
+
+    SELECT
         'access_input_pod_sales_zero_quantity_remaining', 'ERROR', 'access_input_pod_sales',
         COUNTIF(COALESCE(quantity, 0) = 0),
         TO_JSON_STRING(ARRAY_AGG(IF(
